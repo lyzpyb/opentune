@@ -13,7 +13,12 @@ const {
   session,
   shell,
 } = require('electron');
+const { spawn } = require('child_process');
+const crypto = require('crypto');
 const fs = require('fs');
+const http = require('http');
+const net = require('net');
+const os = require('os');
 const path = require('path');
 
 // Prevent Chromium/macOS from throttling background audio timers or blocking autoplay across track transitions
@@ -24,6 +29,7 @@ app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
 
 const APP_NAME = "OpenTune";
 const START_URL = "https://music.youtube.com";
+const GOOGLE_LOGIN_URL = 'https://accounts.google.com/ServiceLogin?service=youtube&continue=https%3A%2F%2Fmusic.youtube.com%2F';
 const PARTITION_NAME = 'persist:ytmusic';
 const SANITIZE_UA = true;
 const ENABLE_MEDIA_KEYS = true;
@@ -33,14 +39,15 @@ const PROXY_SERVER = "";
 
 const CHROME_VERSION = process.versions.chrome || '130.0.0.0';
 const CHROME_MAC_UA = `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${CHROME_VERSION} Safari/537.36`;
-// Firefox UA avoids Chromium Sec-CH-UA / embedded attestation checks on accounts.google.com
-const FIREFOX_MAC_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:132.0) Gecko/20100101 Firefox/132.0';
 
 let mainWindow = null;
 let tray = null;
 let trayWindow = null;
+let authWindow = null;
 let isQuitting = false;
 let powerBlockerId = null;
+
+let activeAuthSession = null;
 
 let currentTrack = {
   title: '未在播放',
@@ -64,6 +71,7 @@ function isGoogleAuthUrl(rawUrl) {
       host === 'myaccount.google.com' ||
       host === 'consent.youtube.com' ||
       host === 'consent.google.com' ||
+      (host === 'www.youtube.com' && parsed.pathname.startsWith('/signin')) ||
       (host.endsWith('.google.com') && parsed.pathname.includes('/o/oauth2'))
     );
   } catch (_) {
@@ -76,11 +84,7 @@ function isAllowedInAppUrl(rawUrl) {
     const parsed = new URL(rawUrl);
     if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return false;
     const host = parsed.hostname.toLowerCase();
-    return (
-      host === 'music.youtube.com' ||
-      host === 'www.youtube.com' && parsed.pathname.startsWith('/signin') ||
-      isGoogleAuthUrl(rawUrl)
-    );
+    return host === 'music.youtube.com';
   } catch (_) {
     return false;
   }
@@ -123,16 +127,493 @@ function broadcastTrackToTray() {
   }
 }
 
-function attachDynamicUaListeners(contents) {
-  if (!SANITIZE_UA || !contents) return;
-  const syncUaForUrl = (_event, url) => {
-    const targetUa = isGoogleAuthUrl(url) ? FIREFOX_MAC_UA : CHROME_MAC_UA;
-    if (contents.getUserAgent() !== targetUa) {
-      contents.setUserAgent(targetUa);
+function sendAuthStatus(payload) {
+  if (authWindow && !authWindow.isDestroyed()) {
+    authWindow.webContents.send('ytm:auth-status', payload);
+  }
+}
+
+function findInstalledChromiumBrowser() {
+  const home = os.homedir();
+  const candidates =
+    process.platform === 'darwin'
+      ? [
+          { name: 'Google Chrome', path: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' },
+          { name: 'Google Chrome', path: path.join(home, 'Applications/Google Chrome.app/Contents/MacOS/Google Chrome') },
+          { name: 'Microsoft Edge', path: '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge' },
+          { name: 'Brave Browser', path: '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser' },
+          { name: 'Vivaldi', path: '/Applications/Vivaldi.app/Contents/MacOS/Vivaldi' },
+          { name: 'Chromium', path: '/Applications/Chromium.app/Contents/MacOS/Chromium' },
+          { name: 'Chrome Canary', path: '/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary' },
+        ]
+      : [
+          { name: 'Google Chrome', path: '/usr/bin/google-chrome' },
+          { name: 'Chromium', path: '/usr/bin/chromium' },
+          { name: 'Microsoft Edge', path: '/usr/bin/microsoft-edge' },
+        ];
+
+  for (const item of candidates) {
+    try {
+      if (fs.existsSync(item.path)) return item;
+    } catch (_) {}
+  }
+  return null;
+}
+
+function getFreeLocalPort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.unref();
+    server.on('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const addr = server.address();
+      const port = typeof addr === 'object' && addr ? addr.port : 0;
+      server.close(() => resolve(port));
+    });
+  });
+}
+
+function httpGetLocalJson(port, urlPath) {
+  return new Promise((resolve, reject) => {
+    const req = http.get({ host: '127.0.0.1', port, path: urlPath, timeout: 2500 }, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => {
+        body += chunk;
+      });
+      res.on('end', () => {
+        try {
+          resolve(JSON.parse(body));
+        } catch (err) {
+          reject(err);
+        }
+      });
+    });
+    req.on('timeout', () => {
+      req.destroy(new Error('timeout'));
+    });
+    req.on('error', reject);
+  });
+}
+
+function cdpSendCommand(wsUrl, method, params = {}) {
+  return new Promise((resolve, reject) => {
+    let parsed;
+    try {
+      parsed = new URL(wsUrl);
+    } catch (err) {
+      reject(err);
+      return;
     }
+    if (parsed.hostname !== '127.0.0.1' && parsed.hostname !== 'localhost') {
+      reject(new Error('Refusing non-loopback CDP connection'));
+      return;
+    }
+
+    const requestId = 1;
+    const key = crypto.randomBytes(16).toString('base64');
+    const socket = net.createConnection({ host: '127.0.0.1', port: Number(parsed.port) });
+    let settled = false;
+    let handshakeDone = false;
+    let buffer = Buffer.alloc(0);
+    let fragmentedChunks = [];
+
+    const finish = (err, result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        socket.destroy();
+      } catch (_) {}
+      if (err) reject(err);
+      else resolve(result);
+    };
+
+    const timer = setTimeout(() => finish(new Error('CDP request timed out')), 10000);
+
+    const writeMaskedFrame = (opcode, payloadBuf) => {
+      const len = payloadBuf.length;
+      let header;
+      if (len < 126) {
+        header = Buffer.alloc(2);
+        header[0] = 0x80 | opcode;
+        header[1] = 0x80 | len;
+      } else if (len < 65536) {
+        header = Buffer.alloc(4);
+        header[0] = 0x80 | opcode;
+        header[1] = 0x80 | 126;
+        header.writeUInt16BE(len, 2);
+      } else {
+        header = Buffer.alloc(10);
+        header[0] = 0x80 | opcode;
+        header[1] = 0x80 | 127;
+        header.writeBigUInt64BE(BigInt(len), 2);
+      }
+      const mask = crypto.randomBytes(4);
+      const masked = Buffer.alloc(len);
+      for (let i = 0; i < len; i += 1) {
+        masked[i] = payloadBuf[i] ^ mask[i % 4];
+      }
+      socket.write(Buffer.concat([header, mask, masked]));
+    };
+
+    socket.on('connect', () => {
+      const reqPath = (parsed.pathname || '/') + (parsed.search || '');
+      const headers = [
+        `GET ${reqPath} HTTP/1.1`,
+        `Host: 127.0.0.1:${parsed.port}`,
+        'Upgrade: websocket',
+        'Connection: Upgrade',
+        `Sec-WebSocket-Key: ${key}`,
+        'Sec-WebSocket-Version: 13',
+        '',
+        '',
+      ].join('\r\n');
+      socket.write(headers);
+    });
+
+    socket.on('data', (chunk) => {
+      buffer = Buffer.concat([buffer, chunk]);
+      if (!handshakeDone) {
+        const sepIdx = buffer.indexOf('\r\n\r\n');
+        if (sepIdx === -1) return;
+        const headerStr = buffer.slice(0, sepIdx).toString('utf8');
+        if (!headerStr.includes('101')) {
+          finish(new Error('WebSocket handshake rejected'));
+          return;
+        }
+        handshakeDone = true;
+        buffer = buffer.slice(sepIdx + 4);
+        const msg = JSON.stringify({ id: requestId, method, params });
+        writeMaskedFrame(0x1, Buffer.from(msg, 'utf8'));
+      }
+
+      while (buffer.length >= 2) {
+        const first = buffer[0];
+        const second = buffer[1];
+        const fin = (first & 0x80) !== 0;
+        const opcode = first & 0x0f;
+        const isMasked = (second & 0x80) !== 0;
+        let payloadLen = second & 0x7f;
+        let offset = 2;
+
+        if (payloadLen === 126) {
+          if (buffer.length < offset + 2) return;
+          payloadLen = buffer.readUInt16BE(offset);
+          offset += 2;
+        } else if (payloadLen === 127) {
+          if (buffer.length < offset + 8) return;
+          payloadLen = Number(buffer.readBigUInt64BE(offset));
+          offset += 8;
+        }
+
+        const maskLen = isMasked ? 4 : 0;
+        if (buffer.length < offset + maskLen + payloadLen) return;
+
+        let payload = buffer.slice(offset + maskLen, offset + maskLen + payloadLen);
+        if (isMasked) {
+          const maskKey = buffer.slice(offset, offset + 4);
+          const unmasked = Buffer.alloc(payloadLen);
+          for (let i = 0; i < payloadLen; i += 1) {
+            unmasked[i] = payload[i] ^ maskKey[i % 4];
+          }
+          payload = unmasked;
+        }
+        buffer = buffer.slice(offset + maskLen + payloadLen);
+
+        if (opcode === 0x9) {
+          writeMaskedFrame(0xA, payload);
+          continue;
+        }
+        if (opcode === 0x8) {
+          finish(new Error('CDP WebSocket closed before response'));
+          return;
+        }
+
+        if (opcode === 0x1 || opcode === 0x0) {
+          fragmentedChunks.push(payload);
+          if (fin) {
+            const fullText = Buffer.concat(fragmentedChunks).toString('utf8');
+            fragmentedChunks = [];
+            try {
+              const parsedMsg = JSON.parse(fullText);
+              if (parsedMsg.id === requestId) {
+                if (parsedMsg.error) {
+                  finish(new Error(parsedMsg.error.message || 'CDP error'));
+                } else {
+                  finish(null, parsedMsg.result);
+                }
+                return;
+              }
+            } catch (_) {}
+          }
+        }
+      }
+    });
+
+    socket.on('error', (err) => finish(err));
+    socket.on('close', () => finish(new Error('CDP connection closed')));
+  });
+}
+
+function cleanupAuthSession() {
+  if (!activeAuthSession) return;
+  const sessionState = activeAuthSession;
+  activeAuthSession = null;
+
+  if (sessionState.pollTimer) {
+    clearInterval(sessionState.pollTimer);
+  }
+  if (sessionState.child && !sessionState.child.killed) {
+    try {
+      sessionState.child.kill('SIGTERM');
+      setTimeout(() => {
+        try {
+          if (sessionState.child && !sessionState.child.killed) {
+            sessionState.child.kill('SIGKILL');
+          }
+        } catch (_) {}
+      }, 1200);
+    } catch (_) {}
+  }
+  if (sessionState.profileDir) {
+    setTimeout(() => {
+      try {
+        fs.rmSync(sessionState.profileDir, { recursive: true, force: true });
+      } catch (_) {}
+    }, 1500);
+  }
+}
+
+async function importCdpCookiesIntoSession(cdpCookies) {
+  const ses = session.fromPartition(PARTITION_NAME);
+  const sameSiteMap = {
+    None: 'no_restriction',
+    Lax: 'lax',
+    Strict: 'strict',
   };
-  contents.on('will-navigate', syncUaForUrl);
-  contents.on('did-start-navigation', syncUaForUrl);
+
+  let imported = 0;
+  for (const c of cdpCookies) {
+    if (!c || !c.name || typeof c.value !== 'string') continue;
+    const rawDomain = String(c.domain || '');
+    const lowerDomain = rawDomain.toLowerCase();
+    const isRelevant =
+      lowerDomain.endsWith('youtube.com') ||
+      lowerDomain.endsWith('google.com') ||
+      lowerDomain.endsWith('googleusercontent.com');
+    if (!isRelevant) continue;
+
+    const cleanHost = rawDomain.replace(/^\./, '') || 'music.youtube.com';
+    const cookiePath = c.path || '/';
+    const isHostOnly = c.name.startsWith('__Host-') || !rawDomain.startsWith('.');
+    const isSecure = Boolean(c.secure) || c.name.startsWith('__Secure-') || c.name.startsWith('__Host-');
+    const cookieObj = {
+      url: `${isSecure ? 'https' : 'http'}://${cleanHost}${cookiePath}`,
+      name: c.name,
+      value: c.value,
+      path: c.name.startsWith('__Host-') ? '/' : cookiePath,
+      secure: isSecure,
+      httpOnly: Boolean(c.httpOnly),
+      sameSite: sameSiteMap[c.sameSite] || 'unspecified',
+    };
+    if (!isHostOnly) {
+      cookieObj.domain = rawDomain;
+    }
+    if (typeof c.expires === 'number' && c.expires > 0) {
+      cookieObj.expirationDate = c.expires;
+    }
+    try {
+      await ses.cookies.set(cookieObj);
+      imported += 1;
+    } catch (_) {}
+  }
+
+  await ses.cookies.flushStore();
+  return imported;
+}
+
+async function startExternalBrowserLogin() {
+  cleanupAuthSession();
+  const browser = findInstalledChromiumBrowser();
+  if (!browser) {
+    sendAuthStatus({
+      state: 'no-browser',
+      message: '未检测到本机 Chrome / Edge / Brave 浏览器，请使用下方「默认浏览器打开 + 粘贴 Cookie」方式登录。',
+    });
+    return { ok: false, reason: 'no-browser' };
+  }
+
+  try {
+    const port = await getFreeLocalPort();
+    const profileDir = fs.mkdtempSync(path.join(os.tmpdir(), 'opentune-auth-'));
+    const args = [
+      `--user-data-dir=${profileDir}`,
+      `--remote-debugging-port=${port}`,
+      '--remote-debugging-address=127.0.0.1',
+      '--no-first-run',
+      '--no-default-browser-check',
+      '--new-window',
+      GOOGLE_LOGIN_URL,
+    ];
+    if (PROXY_SERVER) {
+      args.splice(args.length - 1, 0, `--proxy-server=${PROXY_SERVER}`);
+    }
+
+    const child = spawn(browser.path, args, {
+      detached: false,
+      stdio: 'ignore',
+    });
+
+    const sessionState = {
+      child,
+      port,
+      profileDir,
+      pollTimer: null,
+      checking: false,
+    };
+    activeAuthSession = sessionState;
+
+    child.on('exit', () => {
+      if (activeAuthSession === sessionState) {
+        cleanupAuthSession();
+        sendAuthStatus({
+          state: 'idle',
+          message: '外部浏览器窗口已关闭。若尚未完成登录，可重新点击按钮启动。',
+        });
+      }
+    });
+
+    sendAuthStatus({
+      state: 'waiting',
+      browserName: browser.name,
+      message: `已唤起外部 ${browser.name}，请在弹出的真实浏览器中完成 Google 登录；跳转回 YouTube Music 后将自动同步账号并关闭临时窗口。`,
+    });
+
+    sessionState.pollTimer = setInterval(async () => {
+      if (activeAuthSession !== sessionState || sessionState.checking) return;
+      sessionState.checking = true;
+      try {
+        const targets = await httpGetLocalJson(port, '/json');
+        if (!Array.isArray(targets)) return;
+
+        const musicTarget = targets.find(
+          (t) =>
+            t &&
+            t.type === 'page' &&
+            typeof t.url === 'string' &&
+            t.url.startsWith('https://music.youtube.com') &&
+            typeof t.webSocketDebuggerUrl === 'string'
+        );
+        if (!musicTarget) return;
+
+        let cookies = [];
+        try {
+          const storageRes = await cdpSendCommand(musicTarget.webSocketDebuggerUrl, 'Storage.getCookies');
+          cookies = Array.isArray(storageRes?.cookies) ? storageRes.cookies : [];
+        } catch (_) {}
+
+        if (cookies.length === 0) {
+          try {
+            const netRes = await cdpSendCommand(musicTarget.webSocketDebuggerUrl, 'Network.getAllCookies');
+            cookies = Array.isArray(netRes?.cookies) ? netRes.cookies : [];
+          } catch (_) {}
+        }
+
+        const authCookieNames = new Set(['SAPISID', '__Secure-3PAPISID', 'SID', '__Secure-3PSID', 'LOGIN_INFO']);
+        const hasAuthCookie = cookies.some(
+          (c) =>
+            c &&
+            authCookieNames.has(c.name) &&
+            typeof c.domain === 'string' &&
+            c.domain.toLowerCase().includes('youtube.com')
+        );
+        if (!hasAuthCookie) return;
+
+        sendAuthStatus({
+          state: 'syncing',
+          message: '检测到登录成功，正在同步 YouTube Music 账号凭证...',
+        });
+
+        const imported = await importCdpCookiesIntoSession(cookies);
+        cleanupAuthSession();
+
+        sendAuthStatus({
+          state: 'success',
+          message: `已成功同步 ${imported} 条登录凭证，正在进入 YouTube Music...`,
+        });
+
+        navigateHome();
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.show();
+          mainWindow.focus();
+        }
+        setTimeout(() => {
+          if (authWindow && !authWindow.isDestroyed()) {
+            authWindow.close();
+          }
+        }, 900);
+      } catch (_) {
+        // Browser may still be starting up; retry on next poll tick
+      } finally {
+        sessionState.checking = false;
+      }
+    }, 1500);
+
+    return { ok: true, browserName: browser.name };
+  } catch (err) {
+    cleanupAuthSession();
+    sendAuthStatus({
+      state: 'error',
+      message: `启动外部浏览器失败：${err && err.message ? err.message : '未知错误'}`,
+    });
+    return { ok: false };
+  }
+}
+
+function openAuthWindow() {
+  if (authWindow && !authWindow.isDestroyed()) {
+    authWindow.show();
+    authWindow.focus();
+    return;
+  }
+
+  const detectedBrowser = findInstalledChromiumBrowser();
+  authWindow = new BrowserWindow({
+    width: 480,
+    height: 540,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    parent: mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined,
+    title: `外部浏览器登录 — ${APP_NAME}`,
+    backgroundColor: '#0e0f14',
+    webPreferences: {
+      preload: path.join(__dirname, 'auth-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+
+  authWindow.setMenuBarVisibility(false);
+  authWindow.loadFile(path.join(__dirname, 'auth.html'));
+
+  authWindow.webContents.on('did-finish-load', () => {
+    sendAuthStatus({
+      state: 'ready',
+      browserName: detectedBrowser ? detectedBrowser.name : '',
+      message: detectedBrowser
+        ? `已检测到本机 ${detectedBrowser.name}，点击下方按钮即可拉起真实浏览器登录并自动回传登录态。`
+        : '未检测到 Chrome / Edge / Brave，可使用下方默认浏览器打开并粘贴 Cookie 完成登录。',
+    });
+  });
+
+  authWindow.on('closed', () => {
+    cleanupAuthSession();
+    authWindow = null;
+  });
 }
 
 function sendPlayerCommand(action, value) {
@@ -224,21 +705,14 @@ function navigateHome() {
   mainWindow.loadURL(START_URL);
 }
 
-async function importCookiesFromClipboard() {
+async function importCookieString(raw) {
   const ses = session.fromPartition(PARTITION_NAME);
-  const raw = (clipboard.readText() || '').trim();
-  if (!raw || !raw.includes('=')) {
-    dialog.showMessageBox(mainWindow, {
-      type: 'info',
-      title: '从浏览器导入 Cookie 登录',
-      message: '剪贴板中未检测到有效的 Cookie 字符串',
-      detail:
-        '请先在 Chrome/Safari 打开并登录 https://music.youtube.com，按 F12 打开开发者工具 → Network → 点击任意请求复制 Request Headers 中的 Cookie 值，然后再点击此菜单即可一键同步登录态。',
-    });
-    return;
+  const text = String(raw || '').trim();
+  if (!text || !text.includes('=')) {
+    return { ok: false, count: 0 };
   }
 
-  const cleaned = raw.replace(/^cookie:\s*/i, '');
+  const cleaned = text.replace(/^cookie:\s*/i, '');
   const pairs = cleaned
     .split(/;\s*/)
     .map((segment) => {
@@ -270,11 +744,30 @@ async function importCookiesFromClipboard() {
   }
 
   await ses.cookies.flushStore();
-  navigateHome();
+  if (imported > 0) {
+    navigateHome();
+  }
+  return { ok: imported > 0, count: imported };
+}
+
+async function importCookiesFromClipboard() {
+  const raw = (clipboard.readText() || '').trim();
+  const result = await importCookieString(raw);
+  if (!result.ok) {
+    dialog.showMessageBox(mainWindow, {
+      type: 'info',
+      title: '从浏览器导入 Cookie 登录',
+      message: '剪贴板中未检测到有效的 Cookie 字符串',
+      detail:
+        '请先在 Chrome/Safari 打开并登录 https://music.youtube.com，按 F12 打开开发者工具 → Network → 点击任意请求复制 Request Headers 中的 Cookie 值，然后再点击此菜单即可一键同步登录态。',
+    });
+    return;
+  }
+
   dialog.showMessageBox(mainWindow, {
     type: 'info',
     title: 'Cookie 导入完成',
-    message: `已同步 ${imported} 条会话 Cookie 并刷新页面`,
+    message: `已同步 ${result.count} 条会话 Cookie 并刷新页面`,
     detail: '如未立即显示头像，请稍等 2 秒或按 Cmd+R 刷新页面。',
   });
 }
@@ -346,15 +839,8 @@ function setupAppMenu() {
       label: '账号',
       submenu: [
         {
-          label: '兼容模式登录 Google 账号',
-          click: () => {
-            if (!mainWindow) return;
-            mainWindow.webContents.setUserAgent(FIREFOX_MAC_UA);
-            mainWindow.loadURL(
-              'https://accounts.google.com/ServiceLogin?service=youtube&continue=https%3A%2F%2Fmusic.youtube.com%2F',
-              { userAgent: FIREFOX_MAC_UA }
-            );
-          },
+          label: '使用外部浏览器登录 Google 账号（推荐）',
+          click: () => openAuthWindow(),
         },
         {
           label: '从剪贴板导入浏览器 Cookie 登录（备用）',
@@ -536,33 +1022,18 @@ async function createMainWindow() {
     app.userAgentFallback = CHROME_MAC_UA;
     ses.setUserAgent(CHROME_MAC_UA);
 
-    // Only alter headers on Google auth hosts (Firefox UA + strip Sec-CH-UA).
-    // Leave googlevideo.com media stream CDN headers untouched to prevent mid-playback 403/CORS failures!
+    // Only remove "Electron" brand token from Sec-CH-UA if present; keep UA completely consistent across all requests
     ses.webRequest.onBeforeSendHeaders((details, callback) => {
-      const isAuth = isGoogleAuthUrl(details.url);
-      if (!isAuth) {
-        const headers = { ...details.requestHeaders };
-        let mutated = false;
-        for (const key of Object.keys(headers)) {
-          const lower = key.toLowerCase();
-          if (lower === 'sec-ch-ua' && typeof headers[key] === 'string' && headers[key].includes('Electron')) {
-            delete headers[key];
-            mutated = true;
-          }
-        }
-        callback(mutated ? { requestHeaders: headers } : { cancel: false });
-        return;
-      }
-
       const headers = { ...details.requestHeaders };
+      let mutated = false;
       for (const key of Object.keys(headers)) {
         const lower = key.toLowerCase();
-        if (lower === 'user-agent' || lower.startsWith('sec-ch-ua')) {
+        if (lower === 'sec-ch-ua' && typeof headers[key] === 'string' && headers[key].includes('Electron')) {
           delete headers[key];
+          mutated = true;
         }
       }
-      headers['User-Agent'] = FIREFOX_MAC_UA;
-      callback({ requestHeaders: headers });
+      callback(mutated ? { requestHeaders: headers } : { cancel: false });
     });
   }
 
@@ -586,10 +1057,26 @@ async function createMainWindow() {
     },
   });
 
-  attachDynamicUaListeners(mainWindow.webContents);
-
-  // Navigation guard: keep main window inside YouTube Music & Google Sign-In; open external/help links in default browser
+  // Intercept Google Sign-In navigations & 302 redirects and route them to External Browser Login (prevents embedded redirect loops)
   mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (isGoogleAuthUrl(url)) {
+      event.preventDefault();
+      openAuthWindow();
+      return;
+    }
+    if (!isAllowedInAppUrl(url)) {
+      event.preventDefault();
+      shell.openExternal(url);
+    }
+  });
+
+  mainWindow.webContents.on('will-redirect', (event, url, _isInPlace, isMainFrame) => {
+    if (!isMainFrame) return;
+    if (isGoogleAuthUrl(url)) {
+      event.preventDefault();
+      openAuthWindow();
+      return;
+    }
     if (!isAllowedInAppUrl(url)) {
       event.preventDefault();
       shell.openExternal(url);
@@ -606,31 +1093,18 @@ async function createMainWindow() {
     else if (direction === 'right') navigateForward();
   });
 
-  // Allow Google Sign-In popups in the same session; send all other external links to default browser
+  // Route Google Sign-In popups to External Browser Login; send other external links to default browser
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (isGoogleAuthUrl(url)) {
+      openAuthWindow();
+      return { action: 'deny' };
+    }
     if (isAllowedInAppUrl(url)) {
-      return {
-        action: 'allow',
-        overrideBrowserWindowOptions: {
-          width: 520,
-          height: 680,
-          webPreferences: {
-            partition: PARTITION_NAME,
-            contextIsolation: true,
-            nodeIntegration: false,
-          },
-        },
-      };
+      mainWindow.loadURL(url);
+      return { action: 'deny' };
     }
     shell.openExternal(url);
     return { action: 'deny' };
-  });
-
-  mainWindow.webContents.on('did-create-window', (childWin, details) => {
-    attachDynamicUaListeners(childWin.webContents);
-    if (SANITIZE_UA && isGoogleAuthUrl(details.url)) {
-      childWin.webContents.setUserAgent(FIREFOX_MAC_UA);
-    }
   });
 
   mainWindow.webContents.on('dom-ready', () => {
@@ -689,6 +1163,42 @@ ipcMain.on('ytm:tray-command', (_event, payload) => {
   sendPlayerCommand(payload.action, payload.value);
 });
 
+ipcMain.handle('ytm:auth-start-external', async () => {
+  return startExternalBrowserLogin();
+});
+
+ipcMain.on('ytm:auth-open-default', () => {
+  shell.openExternal(GOOGLE_LOGIN_URL);
+});
+
+ipcMain.handle('ytm:auth-import-cookie', async (_event, rawCookie) => {
+  const res = await importCookieString(rawCookie);
+  if (res.ok) {
+    cleanupAuthSession();
+    sendAuthStatus({
+      state: 'success',
+      message: `已导入 ${res.count} 条 Cookie，正在刷新 YouTube Music...`,
+    });
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.show();
+      mainWindow.focus();
+    }
+    setTimeout(() => {
+      if (authWindow && !authWindow.isDestroyed()) {
+        authWindow.close();
+      }
+    }, 800);
+  }
+  return res;
+});
+
+ipcMain.on('ytm:auth-cancel', () => {
+  cleanupAuthSession();
+  if (authWindow && !authWindow.isDestroyed()) {
+    authWindow.close();
+  }
+});
+
 app.whenReady().then(async () => {
   setupAppMenu();
   await createMainWindow();
@@ -706,10 +1216,12 @@ app.whenReady().then(async () => {
 
 app.on('before-quit', () => {
   isQuitting = true;
+  cleanupAuthSession();
   updatePowerSaveBlocker(false);
 });
 
 app.on('will-quit', () => {
+  cleanupAuthSession();
   globalShortcut.unregisterAll();
   updatePowerSaveBlocker(false);
 });

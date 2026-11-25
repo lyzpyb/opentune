@@ -145,7 +145,7 @@ dmg:
     path: 'macos-electron/src/main.js',
     target: 'macos',
     language: 'javascript',
-    description: 'Electron 主进程：防播放中断、菜单栏封面/音量迷你控台、原生返回导航与登录防拦截',
+    description: 'Electron 主进程：防播放中断、菜单栏封面/音量迷你控台、原生返回导航与外部浏览器登录同步',
     content: `const {
   app,
   BrowserWindow,
@@ -161,7 +161,12 @@ dmg:
   session,
   shell,
 } = require('electron');
+const { spawn } = require('child_process');
+const crypto = require('crypto');
 const fs = require('fs');
+const http = require('http');
+const net = require('net');
+const os = require('os');
 const path = require('path');
 
 // Prevent Chromium/macOS from throttling background audio timers or blocking autoplay across track transitions
@@ -172,6 +177,7 @@ app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
 
 const APP_NAME = ${JSON.stringify(safeAppName)};
 const START_URL = ${JSON.stringify(safeStartUrl)};
+const GOOGLE_LOGIN_URL = 'https://accounts.google.com/ServiceLogin?service=youtube&continue=https%3A%2F%2Fmusic.youtube.com%2F';
 const PARTITION_NAME = ${config.persistLoginSession ? "'persist:ytmusic'" : "'ytmusic-ephemeral'"};
 const SANITIZE_UA = ${config.sanitizeUserAgent};
 const ENABLE_MEDIA_KEYS = ${config.macMediaKeys};
@@ -181,14 +187,15 @@ const PROXY_SERVER = ${JSON.stringify(safeProxy)};
 
 const CHROME_VERSION = process.versions.chrome || '130.0.0.0';
 const CHROME_MAC_UA = \`Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/\${CHROME_VERSION} Safari/537.36\`;
-// Firefox UA avoids Chromium Sec-CH-UA / embedded attestation checks on accounts.google.com
-const FIREFOX_MAC_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:132.0) Gecko/20100101 Firefox/132.0';
 
 let mainWindow = null;
 let tray = null;
 let trayWindow = null;
+let authWindow = null;
 let isQuitting = false;
 let powerBlockerId = null;
+
+let activeAuthSession = null;
 
 let currentTrack = {
   title: '未在播放',
@@ -212,6 +219,7 @@ function isGoogleAuthUrl(rawUrl) {
       host === 'myaccount.google.com' ||
       host === 'consent.youtube.com' ||
       host === 'consent.google.com' ||
+      (host === 'www.youtube.com' && parsed.pathname.startsWith('/signin')) ||
       (host.endsWith('.google.com') && parsed.pathname.includes('/o/oauth2'))
     );
   } catch (_) {
@@ -224,11 +232,7 @@ function isAllowedInAppUrl(rawUrl) {
     const parsed = new URL(rawUrl);
     if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return false;
     const host = parsed.hostname.toLowerCase();
-    return (
-      host === 'music.youtube.com' ||
-      host === 'www.youtube.com' && parsed.pathname.startsWith('/signin') ||
-      isGoogleAuthUrl(rawUrl)
-    );
+    return host === 'music.youtube.com';
   } catch (_) {
     return false;
   }
@@ -271,16 +275,493 @@ function broadcastTrackToTray() {
   }
 }
 
-function attachDynamicUaListeners(contents) {
-  if (!SANITIZE_UA || !contents) return;
-  const syncUaForUrl = (_event, url) => {
-    const targetUa = isGoogleAuthUrl(url) ? FIREFOX_MAC_UA : CHROME_MAC_UA;
-    if (contents.getUserAgent() !== targetUa) {
-      contents.setUserAgent(targetUa);
+function sendAuthStatus(payload) {
+  if (authWindow && !authWindow.isDestroyed()) {
+    authWindow.webContents.send('ytm:auth-status', payload);
+  }
+}
+
+function findInstalledChromiumBrowser() {
+  const home = os.homedir();
+  const candidates =
+    process.platform === 'darwin'
+      ? [
+          { name: 'Google Chrome', path: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' },
+          { name: 'Google Chrome', path: path.join(home, 'Applications/Google Chrome.app/Contents/MacOS/Google Chrome') },
+          { name: 'Microsoft Edge', path: '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge' },
+          { name: 'Brave Browser', path: '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser' },
+          { name: 'Vivaldi', path: '/Applications/Vivaldi.app/Contents/MacOS/Vivaldi' },
+          { name: 'Chromium', path: '/Applications/Chromium.app/Contents/MacOS/Chromium' },
+          { name: 'Chrome Canary', path: '/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary' },
+        ]
+      : [
+          { name: 'Google Chrome', path: '/usr/bin/google-chrome' },
+          { name: 'Chromium', path: '/usr/bin/chromium' },
+          { name: 'Microsoft Edge', path: '/usr/bin/microsoft-edge' },
+        ];
+
+  for (const item of candidates) {
+    try {
+      if (fs.existsSync(item.path)) return item;
+    } catch (_) {}
+  }
+  return null;
+}
+
+function getFreeLocalPort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.unref();
+    server.on('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const addr = server.address();
+      const port = typeof addr === 'object' && addr ? addr.port : 0;
+      server.close(() => resolve(port));
+    });
+  });
+}
+
+function httpGetLocalJson(port, urlPath) {
+  return new Promise((resolve, reject) => {
+    const req = http.get({ host: '127.0.0.1', port, path: urlPath, timeout: 2500 }, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => {
+        body += chunk;
+      });
+      res.on('end', () => {
+        try {
+          resolve(JSON.parse(body));
+        } catch (err) {
+          reject(err);
+        }
+      });
+    });
+    req.on('timeout', () => {
+      req.destroy(new Error('timeout'));
+    });
+    req.on('error', reject);
+  });
+}
+
+function cdpSendCommand(wsUrl, method, params = {}) {
+  return new Promise((resolve, reject) => {
+    let parsed;
+    try {
+      parsed = new URL(wsUrl);
+    } catch (err) {
+      reject(err);
+      return;
     }
+    if (parsed.hostname !== '127.0.0.1' && parsed.hostname !== 'localhost') {
+      reject(new Error('Refusing non-loopback CDP connection'));
+      return;
+    }
+
+    const requestId = 1;
+    const key = crypto.randomBytes(16).toString('base64');
+    const socket = net.createConnection({ host: '127.0.0.1', port: Number(parsed.port) });
+    let settled = false;
+    let handshakeDone = false;
+    let buffer = Buffer.alloc(0);
+    let fragmentedChunks = [];
+
+    const finish = (err, result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        socket.destroy();
+      } catch (_) {}
+      if (err) reject(err);
+      else resolve(result);
+    };
+
+    const timer = setTimeout(() => finish(new Error('CDP request timed out')), 10000);
+
+    const writeMaskedFrame = (opcode, payloadBuf) => {
+      const len = payloadBuf.length;
+      let header;
+      if (len < 126) {
+        header = Buffer.alloc(2);
+        header[0] = 0x80 | opcode;
+        header[1] = 0x80 | len;
+      } else if (len < 65536) {
+        header = Buffer.alloc(4);
+        header[0] = 0x80 | opcode;
+        header[1] = 0x80 | 126;
+        header.writeUInt16BE(len, 2);
+      } else {
+        header = Buffer.alloc(10);
+        header[0] = 0x80 | opcode;
+        header[1] = 0x80 | 127;
+        header.writeBigUInt64BE(BigInt(len), 2);
+      }
+      const mask = crypto.randomBytes(4);
+      const masked = Buffer.alloc(len);
+      for (let i = 0; i < len; i += 1) {
+        masked[i] = payloadBuf[i] ^ mask[i % 4];
+      }
+      socket.write(Buffer.concat([header, mask, masked]));
+    };
+
+    socket.on('connect', () => {
+      const reqPath = (parsed.pathname || '/') + (parsed.search || '');
+      const headers = [
+        \`GET \${reqPath} HTTP/1.1\`,
+        \`Host: 127.0.0.1:\${parsed.port}\`,
+        'Upgrade: websocket',
+        'Connection: Upgrade',
+        \`Sec-WebSocket-Key: \${key}\`,
+        'Sec-WebSocket-Version: 13',
+        '',
+        '',
+      ].join('\\r\\n');
+      socket.write(headers);
+    });
+
+    socket.on('data', (chunk) => {
+      buffer = Buffer.concat([buffer, chunk]);
+      if (!handshakeDone) {
+        const sepIdx = buffer.indexOf('\\r\\n\\r\\n');
+        if (sepIdx === -1) return;
+        const headerStr = buffer.slice(0, sepIdx).toString('utf8');
+        if (!headerStr.includes('101')) {
+          finish(new Error('WebSocket handshake rejected'));
+          return;
+        }
+        handshakeDone = true;
+        buffer = buffer.slice(sepIdx + 4);
+        const msg = JSON.stringify({ id: requestId, method, params });
+        writeMaskedFrame(0x1, Buffer.from(msg, 'utf8'));
+      }
+
+      while (buffer.length >= 2) {
+        const first = buffer[0];
+        const second = buffer[1];
+        const fin = (first & 0x80) !== 0;
+        const opcode = first & 0x0f;
+        const isMasked = (second & 0x80) !== 0;
+        let payloadLen = second & 0x7f;
+        let offset = 2;
+
+        if (payloadLen === 126) {
+          if (buffer.length < offset + 2) return;
+          payloadLen = buffer.readUInt16BE(offset);
+          offset += 2;
+        } else if (payloadLen === 127) {
+          if (buffer.length < offset + 8) return;
+          payloadLen = Number(buffer.readBigUInt64BE(offset));
+          offset += 8;
+        }
+
+        const maskLen = isMasked ? 4 : 0;
+        if (buffer.length < offset + maskLen + payloadLen) return;
+
+        let payload = buffer.slice(offset + maskLen, offset + maskLen + payloadLen);
+        if (isMasked) {
+          const maskKey = buffer.slice(offset, offset + 4);
+          const unmasked = Buffer.alloc(payloadLen);
+          for (let i = 0; i < payloadLen; i += 1) {
+            unmasked[i] = payload[i] ^ maskKey[i % 4];
+          }
+          payload = unmasked;
+        }
+        buffer = buffer.slice(offset + maskLen + payloadLen);
+
+        if (opcode === 0x9) {
+          writeMaskedFrame(0xA, payload);
+          continue;
+        }
+        if (opcode === 0x8) {
+          finish(new Error('CDP WebSocket closed before response'));
+          return;
+        }
+
+        if (opcode === 0x1 || opcode === 0x0) {
+          fragmentedChunks.push(payload);
+          if (fin) {
+            const fullText = Buffer.concat(fragmentedChunks).toString('utf8');
+            fragmentedChunks = [];
+            try {
+              const parsedMsg = JSON.parse(fullText);
+              if (parsedMsg.id === requestId) {
+                if (parsedMsg.error) {
+                  finish(new Error(parsedMsg.error.message || 'CDP error'));
+                } else {
+                  finish(null, parsedMsg.result);
+                }
+                return;
+              }
+            } catch (_) {}
+          }
+        }
+      }
+    });
+
+    socket.on('error', (err) => finish(err));
+    socket.on('close', () => finish(new Error('CDP connection closed')));
+  });
+}
+
+function cleanupAuthSession() {
+  if (!activeAuthSession) return;
+  const sessionState = activeAuthSession;
+  activeAuthSession = null;
+
+  if (sessionState.pollTimer) {
+    clearInterval(sessionState.pollTimer);
+  }
+  if (sessionState.child && !sessionState.child.killed) {
+    try {
+      sessionState.child.kill('SIGTERM');
+      setTimeout(() => {
+        try {
+          if (sessionState.child && !sessionState.child.killed) {
+            sessionState.child.kill('SIGKILL');
+          }
+        } catch (_) {}
+      }, 1200);
+    } catch (_) {}
+  }
+  if (sessionState.profileDir) {
+    setTimeout(() => {
+      try {
+        fs.rmSync(sessionState.profileDir, { recursive: true, force: true });
+      } catch (_) {}
+    }, 1500);
+  }
+}
+
+async function importCdpCookiesIntoSession(cdpCookies) {
+  const ses = session.fromPartition(PARTITION_NAME);
+  const sameSiteMap = {
+    None: 'no_restriction',
+    Lax: 'lax',
+    Strict: 'strict',
   };
-  contents.on('will-navigate', syncUaForUrl);
-  contents.on('did-start-navigation', syncUaForUrl);
+
+  let imported = 0;
+  for (const c of cdpCookies) {
+    if (!c || !c.name || typeof c.value !== 'string') continue;
+    const rawDomain = String(c.domain || '');
+    const lowerDomain = rawDomain.toLowerCase();
+    const isRelevant =
+      lowerDomain.endsWith('youtube.com') ||
+      lowerDomain.endsWith('google.com') ||
+      lowerDomain.endsWith('googleusercontent.com');
+    if (!isRelevant) continue;
+
+    const cleanHost = rawDomain.replace(/^\\./, '') || 'music.youtube.com';
+    const cookiePath = c.path || '/';
+    const isHostOnly = c.name.startsWith('__Host-') || !rawDomain.startsWith('.');
+    const isSecure = Boolean(c.secure) || c.name.startsWith('__Secure-') || c.name.startsWith('__Host-');
+    const cookieObj = {
+      url: \`\${isSecure ? 'https' : 'http'}://\${cleanHost}\${cookiePath}\`,
+      name: c.name,
+      value: c.value,
+      path: c.name.startsWith('__Host-') ? '/' : cookiePath,
+      secure: isSecure,
+      httpOnly: Boolean(c.httpOnly),
+      sameSite: sameSiteMap[c.sameSite] || 'unspecified',
+    };
+    if (!isHostOnly) {
+      cookieObj.domain = rawDomain;
+    }
+    if (typeof c.expires === 'number' && c.expires > 0) {
+      cookieObj.expirationDate = c.expires;
+    }
+    try {
+      await ses.cookies.set(cookieObj);
+      imported += 1;
+    } catch (_) {}
+  }
+
+  await ses.cookies.flushStore();
+  return imported;
+}
+
+async function startExternalBrowserLogin() {
+  cleanupAuthSession();
+  const browser = findInstalledChromiumBrowser();
+  if (!browser) {
+    sendAuthStatus({
+      state: 'no-browser',
+      message: '未检测到本机 Chrome / Edge / Brave 浏览器，请使用下方「默认浏览器打开 + 粘贴 Cookie」方式登录。',
+    });
+    return { ok: false, reason: 'no-browser' };
+  }
+
+  try {
+    const port = await getFreeLocalPort();
+    const profileDir = fs.mkdtempSync(path.join(os.tmpdir(), 'opentune-auth-'));
+    const args = [
+      \`--user-data-dir=\${profileDir}\`,
+      \`--remote-debugging-port=\${port}\`,
+      '--remote-debugging-address=127.0.0.1',
+      '--no-first-run',
+      '--no-default-browser-check',
+      '--new-window',
+      GOOGLE_LOGIN_URL,
+    ];
+    if (PROXY_SERVER) {
+      args.splice(args.length - 1, 0, \`--proxy-server=\${PROXY_SERVER}\`);
+    }
+
+    const child = spawn(browser.path, args, {
+      detached: false,
+      stdio: 'ignore',
+    });
+
+    const sessionState = {
+      child,
+      port,
+      profileDir,
+      pollTimer: null,
+      checking: false,
+    };
+    activeAuthSession = sessionState;
+
+    child.on('exit', () => {
+      if (activeAuthSession === sessionState) {
+        cleanupAuthSession();
+        sendAuthStatus({
+          state: 'idle',
+          message: '外部浏览器窗口已关闭。若尚未完成登录，可重新点击按钮启动。',
+        });
+      }
+    });
+
+    sendAuthStatus({
+      state: 'waiting',
+      browserName: browser.name,
+      message: \`已唤起外部 \${browser.name}，请在弹出的真实浏览器中完成 Google 登录；跳转回 YouTube Music 后将自动同步账号并关闭临时窗口。\`,
+    });
+
+    sessionState.pollTimer = setInterval(async () => {
+      if (activeAuthSession !== sessionState || sessionState.checking) return;
+      sessionState.checking = true;
+      try {
+        const targets = await httpGetLocalJson(port, '/json');
+        if (!Array.isArray(targets)) return;
+
+        const musicTarget = targets.find(
+          (t) =>
+            t &&
+            t.type === 'page' &&
+            typeof t.url === 'string' &&
+            t.url.startsWith('https://music.youtube.com') &&
+            typeof t.webSocketDebuggerUrl === 'string'
+        );
+        if (!musicTarget) return;
+
+        let cookies = [];
+        try {
+          const storageRes = await cdpSendCommand(musicTarget.webSocketDebuggerUrl, 'Storage.getCookies');
+          cookies = Array.isArray(storageRes?.cookies) ? storageRes.cookies : [];
+        } catch (_) {}
+
+        if (cookies.length === 0) {
+          try {
+            const netRes = await cdpSendCommand(musicTarget.webSocketDebuggerUrl, 'Network.getAllCookies');
+            cookies = Array.isArray(netRes?.cookies) ? netRes.cookies : [];
+          } catch (_) {}
+        }
+
+        const authCookieNames = new Set(['SAPISID', '__Secure-3PAPISID', 'SID', '__Secure-3PSID', 'LOGIN_INFO']);
+        const hasAuthCookie = cookies.some(
+          (c) =>
+            c &&
+            authCookieNames.has(c.name) &&
+            typeof c.domain === 'string' &&
+            c.domain.toLowerCase().includes('youtube.com')
+        );
+        if (!hasAuthCookie) return;
+
+        sendAuthStatus({
+          state: 'syncing',
+          message: '检测到登录成功，正在同步 YouTube Music 账号凭证...',
+        });
+
+        const imported = await importCdpCookiesIntoSession(cookies);
+        cleanupAuthSession();
+
+        sendAuthStatus({
+          state: 'success',
+          message: \`已成功同步 \${imported} 条登录凭证，正在进入 YouTube Music...\`,
+        });
+
+        navigateHome();
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.show();
+          mainWindow.focus();
+        }
+        setTimeout(() => {
+          if (authWindow && !authWindow.isDestroyed()) {
+            authWindow.close();
+          }
+        }, 900);
+      } catch (_) {
+        // Browser may still be starting up; retry on next poll tick
+      } finally {
+        sessionState.checking = false;
+      }
+    }, 1500);
+
+    return { ok: true, browserName: browser.name };
+  } catch (err) {
+    cleanupAuthSession();
+    sendAuthStatus({
+      state: 'error',
+      message: \`启动外部浏览器失败：\${err && err.message ? err.message : '未知错误'}\`,
+    });
+    return { ok: false };
+  }
+}
+
+function openAuthWindow() {
+  if (authWindow && !authWindow.isDestroyed()) {
+    authWindow.show();
+    authWindow.focus();
+    return;
+  }
+
+  const detectedBrowser = findInstalledChromiumBrowser();
+  authWindow = new BrowserWindow({
+    width: 480,
+    height: 540,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    parent: mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined,
+    title: \`外部浏览器登录 — \${APP_NAME}\`,
+    backgroundColor: '#0e0f14',
+    webPreferences: {
+      preload: path.join(__dirname, 'auth-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+
+  authWindow.setMenuBarVisibility(false);
+  authWindow.loadFile(path.join(__dirname, 'auth.html'));
+
+  authWindow.webContents.on('did-finish-load', () => {
+    sendAuthStatus({
+      state: 'ready',
+      browserName: detectedBrowser ? detectedBrowser.name : '',
+      message: detectedBrowser
+        ? \`已检测到本机 \${detectedBrowser.name}，点击下方按钮即可拉起真实浏览器登录并自动回传登录态。\`
+        : '未检测到 Chrome / Edge / Brave，可使用下方默认浏览器打开并粘贴 Cookie 完成登录。',
+    });
+  });
+
+  authWindow.on('closed', () => {
+    cleanupAuthSession();
+    authWindow = null;
+  });
 }
 
 function sendPlayerCommand(action, value) {
@@ -372,21 +853,14 @@ function navigateHome() {
   mainWindow.loadURL(START_URL);
 }
 
-async function importCookiesFromClipboard() {
+async function importCookieString(raw) {
   const ses = session.fromPartition(PARTITION_NAME);
-  const raw = (clipboard.readText() || '').trim();
-  if (!raw || !raw.includes('=')) {
-    dialog.showMessageBox(mainWindow, {
-      type: 'info',
-      title: '从浏览器导入 Cookie 登录',
-      message: '剪贴板中未检测到有效的 Cookie 字符串',
-      detail:
-        '请先在 Chrome/Safari 打开并登录 https://music.youtube.com，按 F12 打开开发者工具 → Network → 点击任意请求复制 Request Headers 中的 Cookie 值，然后再点击此菜单即可一键同步登录态。',
-    });
-    return;
+  const text = String(raw || '').trim();
+  if (!text || !text.includes('=')) {
+    return { ok: false, count: 0 };
   }
 
-  const cleaned = raw.replace(/^cookie:\\s*/i, '');
+  const cleaned = text.replace(/^cookie:\\s*/i, '');
   const pairs = cleaned
     .split(/;\\s*/)
     .map((segment) => {
@@ -418,11 +892,30 @@ async function importCookiesFromClipboard() {
   }
 
   await ses.cookies.flushStore();
-  navigateHome();
+  if (imported > 0) {
+    navigateHome();
+  }
+  return { ok: imported > 0, count: imported };
+}
+
+async function importCookiesFromClipboard() {
+  const raw = (clipboard.readText() || '').trim();
+  const result = await importCookieString(raw);
+  if (!result.ok) {
+    dialog.showMessageBox(mainWindow, {
+      type: 'info',
+      title: '从浏览器导入 Cookie 登录',
+      message: '剪贴板中未检测到有效的 Cookie 字符串',
+      detail:
+        '请先在 Chrome/Safari 打开并登录 https://music.youtube.com，按 F12 打开开发者工具 → Network → 点击任意请求复制 Request Headers 中的 Cookie 值，然后再点击此菜单即可一键同步登录态。',
+    });
+    return;
+  }
+
   dialog.showMessageBox(mainWindow, {
     type: 'info',
     title: 'Cookie 导入完成',
-    message: \`已同步 \${imported} 条会话 Cookie 并刷新页面\`,
+    message: \`已同步 \${result.count} 条会话 Cookie 并刷新页面\`,
     detail: '如未立即显示头像，请稍等 2 秒或按 Cmd+R 刷新页面。',
   });
 }
@@ -494,15 +987,8 @@ function setupAppMenu() {
       label: '账号',
       submenu: [
         {
-          label: '兼容模式登录 Google 账号',
-          click: () => {
-            if (!mainWindow) return;
-            mainWindow.webContents.setUserAgent(FIREFOX_MAC_UA);
-            mainWindow.loadURL(
-              'https://accounts.google.com/ServiceLogin?service=youtube&continue=https%3A%2F%2Fmusic.youtube.com%2F',
-              { userAgent: FIREFOX_MAC_UA }
-            );
-          },
+          label: '使用外部浏览器登录 Google 账号（推荐）',
+          click: () => openAuthWindow(),
         },
         {
           label: '从剪贴板导入浏览器 Cookie 登录（备用）',
@@ -684,33 +1170,18 @@ async function createMainWindow() {
     app.userAgentFallback = CHROME_MAC_UA;
     ses.setUserAgent(CHROME_MAC_UA);
 
-    // Only alter headers on Google auth hosts (Firefox UA + strip Sec-CH-UA).
-    // Leave googlevideo.com media stream CDN headers untouched to prevent mid-playback 403/CORS failures!
+    // Only remove "Electron" brand token from Sec-CH-UA if present; keep UA completely consistent across all requests
     ses.webRequest.onBeforeSendHeaders((details, callback) => {
-      const isAuth = isGoogleAuthUrl(details.url);
-      if (!isAuth) {
-        const headers = { ...details.requestHeaders };
-        let mutated = false;
-        for (const key of Object.keys(headers)) {
-          const lower = key.toLowerCase();
-          if (lower === 'sec-ch-ua' && typeof headers[key] === 'string' && headers[key].includes('Electron')) {
-            delete headers[key];
-            mutated = true;
-          }
-        }
-        callback(mutated ? { requestHeaders: headers } : { cancel: false });
-        return;
-      }
-
       const headers = { ...details.requestHeaders };
+      let mutated = false;
       for (const key of Object.keys(headers)) {
         const lower = key.toLowerCase();
-        if (lower === 'user-agent' || lower.startsWith('sec-ch-ua')) {
+        if (lower === 'sec-ch-ua' && typeof headers[key] === 'string' && headers[key].includes('Electron')) {
           delete headers[key];
+          mutated = true;
         }
       }
-      headers['User-Agent'] = FIREFOX_MAC_UA;
-      callback({ requestHeaders: headers });
+      callback(mutated ? { requestHeaders: headers } : { cancel: false });
     });
   }
 
@@ -734,10 +1205,26 @@ async function createMainWindow() {
     },
   });
 
-  attachDynamicUaListeners(mainWindow.webContents);
-
-  // Navigation guard: keep main window inside YouTube Music & Google Sign-In; open external/help links in default browser
+  // Intercept Google Sign-In navigations & 302 redirects and route them to External Browser Login (prevents embedded redirect loops)
   mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (isGoogleAuthUrl(url)) {
+      event.preventDefault();
+      openAuthWindow();
+      return;
+    }
+    if (!isAllowedInAppUrl(url)) {
+      event.preventDefault();
+      shell.openExternal(url);
+    }
+  });
+
+  mainWindow.webContents.on('will-redirect', (event, url, _isInPlace, isMainFrame) => {
+    if (!isMainFrame) return;
+    if (isGoogleAuthUrl(url)) {
+      event.preventDefault();
+      openAuthWindow();
+      return;
+    }
     if (!isAllowedInAppUrl(url)) {
       event.preventDefault();
       shell.openExternal(url);
@@ -754,31 +1241,18 @@ async function createMainWindow() {
     else if (direction === 'right') navigateForward();
   });
 
-  // Allow Google Sign-In popups in the same session; send all other external links to default browser
+  // Route Google Sign-In popups to External Browser Login; send other external links to default browser
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (isGoogleAuthUrl(url)) {
+      openAuthWindow();
+      return { action: 'deny' };
+    }
     if (isAllowedInAppUrl(url)) {
-      return {
-        action: 'allow',
-        overrideBrowserWindowOptions: {
-          width: 520,
-          height: 680,
-          webPreferences: {
-            partition: PARTITION_NAME,
-            contextIsolation: true,
-            nodeIntegration: false,
-          },
-        },
-      };
+      mainWindow.loadURL(url);
+      return { action: 'deny' };
     }
     shell.openExternal(url);
     return { action: 'deny' };
-  });
-
-  mainWindow.webContents.on('did-create-window', (childWin, details) => {
-    attachDynamicUaListeners(childWin.webContents);
-    if (SANITIZE_UA && isGoogleAuthUrl(details.url)) {
-      childWin.webContents.setUserAgent(FIREFOX_MAC_UA);
-    }
   });
 
   mainWindow.webContents.on('dom-ready', () => {
@@ -837,6 +1311,42 @@ ipcMain.on('ytm:tray-command', (_event, payload) => {
   sendPlayerCommand(payload.action, payload.value);
 });
 
+ipcMain.handle('ytm:auth-start-external', async () => {
+  return startExternalBrowserLogin();
+});
+
+ipcMain.on('ytm:auth-open-default', () => {
+  shell.openExternal(GOOGLE_LOGIN_URL);
+});
+
+ipcMain.handle('ytm:auth-import-cookie', async (_event, rawCookie) => {
+  const res = await importCookieString(rawCookie);
+  if (res.ok) {
+    cleanupAuthSession();
+    sendAuthStatus({
+      state: 'success',
+      message: \`已导入 \${res.count} 条 Cookie，正在刷新 YouTube Music...\`,
+    });
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.show();
+      mainWindow.focus();
+    }
+    setTimeout(() => {
+      if (authWindow && !authWindow.isDestroyed()) {
+        authWindow.close();
+      }
+    }, 800);
+  }
+  return res;
+});
+
+ipcMain.on('ytm:auth-cancel', () => {
+  cleanupAuthSession();
+  if (authWindow && !authWindow.isDestroyed()) {
+    authWindow.close();
+  }
+});
+
 app.whenReady().then(async () => {
   setupAppMenu();
   await createMainWindow();
@@ -854,10 +1364,12 @@ app.whenReady().then(async () => {
 
 app.on('before-quit', () => {
   isQuitting = true;
+  cleanupAuthSession();
   updatePowerSaveBlocker(false);
 });
 
 app.on('will-quit', () => {
+  cleanupAuthSession();
   globalShortcut.unregisterAll();
   updatePowerSaveBlocker(false);
 });
@@ -1450,6 +1962,281 @@ contextBridge.exposeInMainWorld('ytmTrayBridge', {
   });
 
   files.push({
+    path: 'macos-electron/src/auth-preload.js',
+    target: 'macos',
+    language: 'javascript',
+    description: '外部浏览器登录弹窗 Preload 安全 IPC 桥接',
+    content: `const { contextBridge, ipcRenderer } = require('electron');
+
+contextBridge.exposeInMainWorld('ytmAuthBridge', {
+  startExternalBrowser() {
+    return ipcRenderer.invoke('ytm:auth-start-external');
+  },
+  openDefaultBrowser() {
+    ipcRenderer.send('ytm:auth-open-default');
+  },
+  importCookie(raw) {
+    return ipcRenderer.invoke('ytm:auth-import-cookie', raw);
+  },
+  cancel() {
+    ipcRenderer.send('ytm:auth-cancel');
+  },
+  onStatus(listener) {
+    ipcRenderer.on('ytm:auth-status', (_event, payload) => listener(payload));
+  },
+});
+`,
+  });
+
+  files.push({
+    path: 'macos-electron/src/auth.html',
+    target: 'macos',
+    language: 'html',
+    description: '外部浏览器登录引导弹窗：一键拉起系统 Chrome/Edge/Brave 自动回传登录态，并支持默认浏览器 + Cookie 粘贴兜底',
+    content: `<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>外部浏览器登录</title>
+    <style>
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+        background: #0e0f14;
+        color: #f4f4f6;
+        padding: 22px;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+      }
+      .header h1 {
+        font-size: 18px;
+        font-weight: 700;
+        letter-spacing: -0.01em;
+      }
+      .header p {
+        margin-top: 6px;
+        font-size: 12.5px;
+        line-height: 1.55;
+        color: rgba(244, 244, 246, 0.65);
+      }
+      .card {
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 14px;
+        padding: 15px;
+        display: flex;
+        flex-direction: column;
+        gap: 11px;
+      }
+      .card-title {
+        font-size: 13px;
+        font-weight: 600;
+        color: #fff;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+      .badge {
+        font-size: 11px;
+        font-weight: 600;
+        color: #ff4d6d;
+        background: rgba(255, 0, 51, 0.14);
+        border: 1px solid rgba(255, 0, 51, 0.3);
+        padding: 2px 8px;
+        border-radius: 6px;
+      }
+      .status-box {
+        font-size: 12px;
+        line-height: 1.5;
+        color: rgba(244, 244, 246, 0.8);
+        background: rgba(0, 0, 0, 0.32);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 10px;
+        padding: 10px 12px;
+      }
+      .status-box.waiting {
+        border-color: rgba(56, 189, 248, 0.4);
+        color: #bae6fd;
+      }
+      .status-box.success {
+        border-color: rgba(34, 197, 94, 0.45);
+        color: #bbf7d0;
+      }
+      .status-box.error {
+        border-color: rgba(248, 113, 113, 0.45);
+        color: #fecaca;
+      }
+      .btn-primary {
+        width: 100%;
+        height: 40px;
+        border: none;
+        border-radius: 10px;
+        background: #ff0033;
+        color: #fff;
+        font-size: 13.5px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: background 0.15s ease, opacity 0.15s ease;
+      }
+      .btn-primary:hover { background: #e6002e; }
+      .btn-primary:disabled { opacity: 0.55; cursor: default; }
+      .btn-row {
+        display: flex;
+        gap: 8px;
+      }
+      .btn-secondary {
+        flex: 1;
+        height: 34px;
+        border-radius: 9px;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        background: rgba(255, 255, 255, 0.06);
+        color: #f4f4f6;
+        font-size: 12px;
+        font-weight: 500;
+        cursor: pointer;
+      }
+      .btn-secondary:hover { background: rgba(255, 255, 255, 0.12); }
+      textarea {
+        width: 100%;
+        min-height: 76px;
+        resize: vertical;
+        border-radius: 10px;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        background: rgba(0, 0, 0, 0.4);
+        color: #f4f4f6;
+        font-size: 11.5px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        padding: 9px 10px;
+        outline: none;
+      }
+      textarea:focus { border-color: rgba(255, 0, 51, 0.65); }
+      .hint {
+        font-size: 11.5px;
+        line-height: 1.45;
+        color: rgba(244, 244, 246, 0.55);
+      }
+      .footer {
+        margin-top: auto;
+        display: flex;
+        justify-content: flex-end;
+      }
+      .btn-ghost {
+        border: none;
+        background: transparent;
+        color: rgba(244, 244, 246, 0.6);
+        font-size: 12px;
+        cursor: pointer;
+        padding: 6px 10px;
+      }
+      .btn-ghost:hover { color: #fff; }
+    </style>
+  </head>
+  <body>
+    <div class="header">
+      <h1>使用外部浏览器登录 Google 账号</h1>
+      <p>
+        为彻底规避内嵌窗口登录风控与无限刷新循环，客户端将通过你电脑上安装的真实浏览器完成 Google 认证并自动同步登录凭证。
+      </p>
+    </div>
+
+    <div class="card">
+      <div class="card-title">
+        <span>方式一：外部真实浏览器自动同步</span>
+        <span class="badge">推荐</span>
+      </div>
+      <div id="statusBox" class="status-box">正在检测本机已安装的 Chrome / Edge / Brave...</div>
+      <button id="launchBtn" class="btn-primary">打开外部浏览器登录并自动同步</button>
+    </div>
+
+    <div class="card">
+      <div class="card-title">
+        <span>方式二：默认浏览器打开 + 粘贴 Cookie（Safari / 备用）</span>
+      </div>
+      <p class="hint">
+        如果你只使用 Safari，可先点下方按钮打开登录页，登录后复制 <code>music.youtube.com</code> 请求头中的 <code>Cookie</code> 粘贴于此：
+      </p>
+      <textarea id="cookieInput" placeholder="在此粘贴从浏览器开发者工具复制的 Cookie 字符串..."></textarea>
+      <div class="btn-row">
+        <button id="openDefaultBtn" class="btn-secondary">在系统默认浏览器打开</button>
+        <button id="importBtn" class="btn-secondary">导入 Cookie 并登录</button>
+      </div>
+    </div>
+
+    <div class="footer">
+      <button id="cancelBtn" class="btn-ghost">关闭窗口</button>
+    </div>
+
+    <script>
+      const statusBox = document.getElementById('statusBox');
+      const launchBtn = document.getElementById('launchBtn');
+      const openDefaultBtn = document.getElementById('openDefaultBtn');
+      const importBtn = document.getElementById('importBtn');
+      const cookieInput = document.getElementById('cookieInput');
+      const cancelBtn = document.getElementById('cancelBtn');
+
+      function setStatus(state, message) {
+        statusBox.textContent = message || '';
+        statusBox.className = 'status-box' + (state === 'waiting' || state === 'syncing' ? ' waiting' : state === 'success' ? ' success' : state === 'error' || state === 'no-browser' ? ' error' : '');
+      }
+
+      window.ytmAuthBridge.onStatus((payload) => {
+        if (!payload) return;
+        setStatus(payload.state, payload.message);
+        if (payload.browserName && payload.state === 'ready') {
+          launchBtn.textContent = '使用外部 ' + payload.browserName + ' 登录并自动同步';
+          launchBtn.disabled = false;
+        } else if (payload.state === 'waiting' || payload.state === 'syncing') {
+          launchBtn.textContent = '等待外部浏览器完成登录中...';
+          launchBtn.disabled = true;
+        } else if (payload.state === 'no-browser') {
+          launchBtn.textContent = '未检测到 Chrome / Edge / Brave';
+          launchBtn.disabled = true;
+        } else if (payload.state === 'idle' || payload.state === 'error') {
+          launchBtn.textContent = '重新打开外部浏览器登录';
+          launchBtn.disabled = false;
+        } else if (payload.state === 'success') {
+          launchBtn.textContent = '同步成功！正在跳转...';
+          launchBtn.disabled = true;
+        }
+      });
+
+      launchBtn.addEventListener('click', () => {
+        launchBtn.disabled = true;
+        launchBtn.textContent = '正在拉起外部浏览器...';
+        window.ytmAuthBridge.startExternalBrowser();
+      });
+
+      openDefaultBtn.addEventListener('click', () => {
+        window.ytmAuthBridge.openDefaultBrowser();
+      });
+
+      importBtn.addEventListener('click', async () => {
+        const raw = (cookieInput.value || '').trim();
+        if (!raw || !raw.includes('=')) {
+          setStatus('error', '请先粘贴包含 key=value 格式的 Cookie 字符串。');
+          return;
+        }
+        importBtn.disabled = true;
+        const res = await window.ytmAuthBridge.importCookie(raw);
+        if (!res || !res.ok) {
+          setStatus('error', '未解析到有效 Cookie，请检查粘贴内容后重试。');
+          importBtn.disabled = false;
+        }
+      });
+
+      cancelBtn.addEventListener('click', () => {
+        window.ytmAuthBridge.cancel();
+      });
+    </script>
+  </body>
+</html>
+`,
+  });
+
+  files.push({
     path: 'macos-electron/src/inject.css',
     target: 'macos',
     language: 'css',
@@ -1775,13 +2562,14 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var webView: WebView
     private lateinit var floatingNavBar: LinearLayout
+    private lateinit var externalLoginButton: Button
     private lateinit var cookieFallbackButton: Button
     private val startUrl = ${JSON.stringify(safeStartUrl)}
+    private val googleLoginUrl =
+        "https://accounts.google.com/ServiceLogin?service=youtube&continue=https%3A%2F%2Fmusic.youtube.com%2F"
     private val sanitizeUa = ${config.sanitizeUserAgent}
 
-    // Firefox Android UA bypasses Chromium/WebView attestation checks on accounts.google.com
-    private val firefoxAndroidUa =
-        "Mozilla/5.0 (Android 14; Mobile; rv:132.0) Gecko/132.0 Firefox/132.0"
+    // Keep one consistent Chrome Mobile UA across all redirects to prevent Google Sign-In auto-refresh loops
     private val chromeAndroidUa =
         "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.6723.107 Mobile Safari/537.36"
 
@@ -1830,7 +2618,7 @@ class MainActivity : AppCompatActivity() {
         }
         root.addView(webView)
 
-        // Floating Back / Home bar shown automatically whenever outside music.youtube.com
+        // Floating Back / Home / External Browser Login bar shown automatically whenever outside music.youtube.com
         floatingNavBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setBackgroundColor(Color.parseColor("#E6121318"))
@@ -1843,37 +2631,48 @@ class MainActivity : AppCompatActivity() {
             textSize = 12f
             setTextColor(Color.WHITE)
             setBackgroundColor(Color.parseColor("#33FFFFFF"))
-            setPadding(24, 8, 24, 8)
+            setPadding(20, 8, 20, 8)
             setOnClickListener {
                 if (webView.canGoBack()) webView.goBack() else loadMusicHome()
             }
         }
         val homeBtn = Button(this).apply {
-            text = "⌂ 音乐首页"
+            text = "⌂ 首页"
             textSize = 12f
             setTextColor(Color.WHITE)
             setBackgroundColor(Color.parseColor("#FF0033"))
-            setPadding(24, 8, 24, 8)
+            setPadding(20, 8, 20, 8)
             setOnClickListener { loadMusicHome() }
+        }
+        externalLoginButton = Button(this).apply {
+            text = "外部浏览器登录"
+            textSize = 12f
+            setTextColor(Color.WHITE)
+            setBackgroundColor(Color.parseColor("#2563EB"))
+            setPadding(20, 8, 20, 8)
+            visibility = View.GONE
+            setOnClickListener { openExternalBrowserLogin() }
         }
         cookieFallbackButton = Button(this).apply {
             text = "粘贴 Cookie"
             textSize = 12f
             setTextColor(Color.WHITE)
             setBackgroundColor(Color.parseColor("#33FFFFFF"))
-            setPadding(24, 8, 24, 8)
+            setPadding(20, 8, 20, 8)
             visibility = View.GONE
             setOnClickListener { showCookieImportDialog() }
         }
 
         val spacer = {
             View(this).apply {
-                layoutParams = LinearLayout.LayoutParams(12, 1)
+                layoutParams = LinearLayout.LayoutParams(10, 1)
             }
         }
         floatingNavBar.addView(backBtn)
         floatingNavBar.addView(spacer())
         floatingNavBar.addView(homeBtn)
+        floatingNavBar.addView(spacer())
+        floatingNavBar.addView(externalLoginButton)
         floatingNavBar.addView(spacer())
         floatingNavBar.addView(cookieFallbackButton)
 
@@ -1898,10 +2697,16 @@ class MainActivity : AppCompatActivity() {
         ContextCompat.registerReceiver(this, mediaControlReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
     }
 
-    private fun loadMusicHome() {
-        if (sanitizeUa) {
-            webView.settings.userAgentString = chromeAndroidUa
+    private fun openExternalBrowserLogin() {
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(googleLoginUrl)))
+            Toast.makeText(this, "已在外部浏览器打开登录页，登录完成后可点「粘贴 Cookie」同步", Toast.LENGTH_LONG).show()
+        } catch (_: Exception) {
+            Toast.makeText(this, "未找到可用的外部浏览器", Toast.LENGTH_SHORT).show()
         }
+    }
+
+    private fun loadMusicHome() {
         webView.loadUrl(startUrl)
     }
 
@@ -1909,9 +2714,6 @@ class MainActivity : AppCompatActivity() {
         super.onNewIntent(intent)
         val deepLink = intent.dataString
         if (!deepLink.isNullOrBlank() && deepLink.startsWith("https://music.youtube.com")) {
-            if (sanitizeUa) {
-                webView.settings.userAgentString = chromeAndroidUa
-            }
             webView.loadUrl(deepLink)
         }
     }
@@ -1959,7 +2761,6 @@ class MainActivity : AppCompatActivity() {
             override fun shouldOverrideUrlLoading(v: WebView?, request: WebResourceRequest?): Boolean {
                 val url = request?.url ?: return false
                 val host = url.host.orEmpty()
-                val urlStr = url.toString()
 
                 if (!isAllowedInAppHost(host)) {
                     try {
@@ -1968,18 +2769,7 @@ class MainActivity : AppCompatActivity() {
                     return true
                 }
 
-                if (sanitizeUa && v != null) {
-                    if (isGoogleAuthHost(host) && v.settings.userAgentString != firefoxAndroidUa) {
-                        v.settings.userAgentString = firefoxAndroidUa
-                        v.loadUrl(urlStr)
-                        return true
-                    } else if (host.equals("music.youtube.com", ignoreCase = true) && v.settings.userAgentString != chromeAndroidUa) {
-                        v.settings.userAgentString = chromeAndroidUa
-                        v.loadUrl(urlStr)
-                        return true
-                    }
-                }
-
+                // Never mutate UA or call v.loadUrl() mid-redirect — let Chromium follow Google Sign-In hops cleanly
                 return false
             }
 
@@ -1991,8 +2781,10 @@ class MainActivity : AppCompatActivity() {
                     ""
                 }
                 val onMusic = host.equals("music.youtube.com", ignoreCase = true)
+                val isAuth = isGoogleAuthHost(host)
                 floatingNavBar.visibility = if (onMusic) View.GONE else View.VISIBLE
-                cookieFallbackButton.visibility = if (isGoogleAuthHost(host)) View.VISIBLE else View.GONE
+                externalLoginButton.visibility = if (isAuth) View.VISIBLE else View.GONE
+                cookieFallbackButton.visibility = if (isAuth) View.VISIBLE else View.GONE
             }
 
             override fun onPageFinished(v: WebView?, url: String?) {
@@ -2010,8 +2802,8 @@ class MainActivity : AppCompatActivity() {
             maxLines = 6
         }
         AlertDialog.Builder(this)
-            .setTitle("从浏览器同步登录 Cookie")
-            .setMessage("如账号开启严格安全拦截，可在桌面或手机浏览器登录 music.youtube.com 后复制 Cookie 字符串粘贴到此处：")
+            .setTitle("从外部浏览器同步登录 Cookie")
+            .setMessage("如账号开启严格安全拦截，可点下方「打开外部浏览器」登录 music.youtube.com，再复制 Cookie 字符串粘贴到此处：")
             .setView(input)
             .setPositiveButton("导入并刷新") { _, _ ->
                 val raw = input.text?.toString()?.trim().orEmpty().replace(Regex("^cookie:\\\\s*", RegexOption.IGNORE_CASE), "")
@@ -2034,6 +2826,9 @@ class MainActivity : AppCompatActivity() {
                 cm.flush()
                 loadMusicHome()
                 Toast.makeText(this, "已导入 $count 条 Cookie，正在加载主页", Toast.LENGTH_SHORT).show()
+            }
+            .setNeutralButton("打开外部浏览器") { _, _ ->
+                openExternalBrowserLogin()
             }
             .setNegativeButton("取消", null)
             .show()
@@ -2529,7 +3324,7 @@ jobs:
 
 浏览器自带的「安装为网页应用 (PWA)」虽然能打开 YouTube Music，但往往缺少菜单栏迷你控台、系统级后台保活、返回导航与登录防拦截。**${safeAppName}** 不依赖任何第三方破解接口，直接封装官方网页端并深度增强原生交互：
 
-- **100% 保留 YouTube Premium 会员权益**：官方账号直登，无广告、256kbps 高音质、歌单与推荐算法实时同步；内置登录态 UA 兼容与浏览器 Cookie 一键同步兜底，解决内嵌浏览器登录风控拦截。
+- **100% 保留 YouTube Premium 会员权益**：通过**外部真实浏览器登录并自动同步凭证**，彻底规避内嵌浏览器风控拦截与循环刷新；无广告、256kbps 高音质、歌单与推荐算法实时同步。
 - **macOS 顶部状态栏迷你控台**：点击菜单栏图标即弹出磨砂深色迷你播放器，实时展示**专辑封面、可跳转进度条、上一首 / 播放暂停 / 下一首、静音与音量滑块**。
 - **原生返回导航与防迷路拦截**：窗口左上角常驻**返回 / 前进 / 刷新 / 首页**原生导航条，支持 macOS 触控板双指滑动与 \`⌘[\` / \`⌘]\` 快捷键；帮助页与外部链接自动转交系统浏览器打开，永不被困在未知页面。
 - **播放稳定性与后台防断流**：关闭 macOS App Nap 与后台计时器节流、放行受保护媒体流（DRM）权限、自动消除「您还在收听吗？」弹窗并在流异常时自动恢复。
@@ -2561,7 +3356,7 @@ jobs:
    \`\`\`bash
    xattr -cr "/Applications/${safeAppName}.app"
    \`\`\`
-4. 登录 Google 账号：若账号开启极严格风控，可在顶部菜单栏点击 **账号 → 从剪贴板导入浏览器 Cookie 登录（备用）** 一键同步。
+4. **外部浏览器登录 Google 账号**：点击右上角「登录」按钮（或顶部菜单栏 **账号 → 使用外部浏览器登录 Google 账号**），客户端会自动拉起你本机的 Chrome / Edge / Brave 完成真实浏览器认证并自动同步登录态；如仅使用 Safari，亦可在弹窗中打开默认浏览器并粘贴 Cookie 同步。
 
 ### Android (\`.apk\`)
 1. 在 Releases 页面下载 \`app-release.apk\` 并传输至手机安装（允许「安装未知来源应用」）。

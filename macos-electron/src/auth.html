@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>外部浏览器登录</title>
+    <style>
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+        background: #0e0f14;
+        color: #f4f4f6;
+        padding: 22px;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+      }
+      .header h1 {
+        font-size: 18px;
+        font-weight: 700;
+        letter-spacing: -0.01em;
+      }
+      .header p {
+        margin-top: 6px;
+        font-size: 12.5px;
+        line-height: 1.55;
+        color: rgba(244, 244, 246, 0.65);
+      }
+      .card {
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 14px;
+        padding: 15px;
+        display: flex;
+        flex-direction: column;
+        gap: 11px;
+      }
+      .card-title {
+        font-size: 13px;
+        font-weight: 600;
+        color: #fff;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+      .badge {
+        font-size: 11px;
+        font-weight: 600;
+        color: #ff4d6d;
+        background: rgba(255, 0, 51, 0.14);
+        border: 1px solid rgba(255, 0, 51, 0.3);
+        padding: 2px 8px;
+        border-radius: 6px;
+      }
+      .status-box {
+        font-size: 12px;
+        line-height: 1.5;
+        color: rgba(244, 244, 246, 0.8);
+        background: rgba(0, 0, 0, 0.32);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 10px;
+        padding: 10px 12px;
+      }
+      .status-box.waiting {
+        border-color: rgba(56, 189, 248, 0.4);
+        color: #bae6fd;
+      }
+      .status-box.success {
+        border-color: rgba(34, 197, 94, 0.45);
+        color: #bbf7d0;
+      }
+      .status-box.error {
+        border-color: rgba(248, 113, 113, 0.45);
+        color: #fecaca;
+      }
+      .btn-primary {
+        width: 100%;
+        height: 40px;
+        border: none;
+        border-radius: 10px;
+        background: #ff0033;
+        color: #fff;
+        font-size: 13.5px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: background 0.15s ease, opacity 0.15s ease;
+      }
+      .btn-primary:hover { background: #e6002e; }
+      .btn-primary:disabled { opacity: 0.55; cursor: default; }
+      .btn-row {
+        display: flex;
+        gap: 8px;
+      }
+      .btn-secondary {
+        flex: 1;
+        height: 34px;
+        border-radius: 9px;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        background: rgba(255, 255, 255, 0.06);
+        color: #f4f4f6;
+        font-size: 12px;
+        font-weight: 500;
+        cursor: pointer;
+      }
+      .btn-secondary:hover { background: rgba(255, 255, 255, 0.12); }
+      textarea {
+        width: 100%;
+        min-height: 76px;
+        resize: vertical;
+        border-radius: 10px;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        background: rgba(0, 0, 0, 0.4);
+        color: #f4f4f6;
+        font-size: 11.5px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        padding: 9px 10px;
+        outline: none;
+      }
+      textarea:focus { border-color: rgba(255, 0, 51, 0.65); }
+      .hint {
+        font-size: 11.5px;
+        line-height: 1.45;
+        color: rgba(244, 244, 246, 0.55);
+      }
+      .footer {
+        margin-top: auto;
+        display: flex;
+        justify-content: flex-end;
+      }
+      .btn-ghost {
+        border: none;
+        background: transparent;
+        color: rgba(244, 244, 246, 0.6);
+        font-size: 12px;
+        cursor: pointer;
+        padding: 6px 10px;
+      }
+      .btn-ghost:hover { color: #fff; }
+    </style>
+  </head>
+  <body>
+    <div class="header">
+      <h1>使用外部浏览器登录 Google 账号</h1>
+      <p>
+        为彻底规避内嵌窗口登录风控与无限刷新循环，客户端将通过你电脑上安装的真实浏览器完成 Google 认证并自动同步登录凭证。
+      </p>
+    </div>
+
+    <div class="card">
+      <div class="card-title">
+        <span>方式一：外部真实浏览器自动同步</span>
+        <span class="badge">推荐</span>
+      </div>
+      <div id="statusBox" class="status-box">正在检测本机已安装的 Chrome / Edge / Brave...</div>
+      <button id="launchBtn" class="btn-primary">打开外部浏览器登录并自动同步</button>
+    </div>
+
+    <div class="card">
+      <div class="card-title">
+        <span>方式二：默认浏览器打开 + 粘贴 Cookie（Safari / 备用）</span>
+      </div>
+      <p class="hint">
+        如果你只使用 Safari，可先点下方按钮打开登录页，登录后复制 <code>music.youtube.com</code> 请求头中的 <code>Cookie</code> 粘贴于此：
+      </p>
+      <textarea id="cookieInput" placeholder="在此粘贴从浏览器开发者工具复制的 Cookie 字符串..."></textarea>
+      <div class="btn-row">
+        <button id="openDefaultBtn" class="btn-secondary">在系统默认浏览器打开</button>
+        <button id="importBtn" class="btn-secondary">导入 Cookie 并登录</button>
+      </div>
+    </div>
+
+    <div class="footer">
+      <button id="cancelBtn" class="btn-ghost">关闭窗口</button>
+    </div>
+
+    <script>
+      const statusBox = document.getElementById('statusBox');
+      const launchBtn = document.getElementById('launchBtn');
+      const openDefaultBtn = document.getElementById('openDefaultBtn');
+      const importBtn = document.getElementById('importBtn');
+      const cookieInput = document.getElementById('cookieInput');
+      const cancelBtn = document.getElementById('cancelBtn');
+
+      function setStatus(state, message) {
+        statusBox.textContent = message || '';
+        statusBox.className = 'status-box' + (state === 'waiting' || state === 'syncing' ? ' waiting' : state === 'success' ? ' success' : state === 'error' || state === 'no-browser' ? ' error' : '');
+      }
+
+      window.ytmAuthBridge.onStatus((payload) => {
+        if (!payload) return;
+        setStatus(payload.state, payload.message);
+        if (payload.browserName && payload.state === 'ready') {
+          launchBtn.textContent = '使用外部 ' + payload.browserName + ' 登录并自动同步';
+          launchBtn.disabled = false;
+        } else if (payload.state === 'waiting' || payload.state === 'syncing') {
+          launchBtn.textContent = '等待外部浏览器完成登录中...';
+          launchBtn.disabled = true;
+        } else if (payload.state === 'no-browser') {
+          launchBtn.textContent = '未检测到 Chrome / Edge / Brave';
+          launchBtn.disabled = true;
+        } else if (payload.state === 'idle' || payload.state === 'error') {
+          launchBtn.textContent = '重新打开外部浏览器登录';
+          launchBtn.disabled = false;
+        } else if (payload.state === 'success') {
+          launchBtn.textContent = '同步成功！正在跳转...';
+          launchBtn.disabled = true;
+        }
+      });
+
+      launchBtn.addEventListener('click', () => {
+        launchBtn.disabled = true;
+        launchBtn.textContent = '正在拉起外部浏览器...';
+        window.ytmAuthBridge.startExternalBrowser();
+      });
+
+      openDefaultBtn.addEventListener('click', () => {
+        window.ytmAuthBridge.openDefaultBrowser();
+      });
+
+      importBtn.addEventListener('click', async () => {
+        const raw = (cookieInput.value || '').trim();
+        if (!raw || !raw.includes('=')) {
+          setStatus('error', '请先粘贴包含 key=value 格式的 Cookie 字符串。');
+          return;
+        }
+        importBtn.disabled = true;
+        const res = await window.ytmAuthBridge.importCookie(raw);
+        if (!res || !res.ok) {
+          setStatus('error', '未解析到有效 Cookie，请检查粘贴内容后重试。');
+          importBtn.disabled = false;
+        }
+      });
+
+      cancelBtn.addEventListener('click', () => {
+        window.ytmAuthBridge.cancel();
+      });
+    </script>
+  </body>
+</html>

@@ -39,13 +39,14 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var webView: WebView
     private lateinit var floatingNavBar: LinearLayout
+    private lateinit var externalLoginButton: Button
     private lateinit var cookieFallbackButton: Button
     private val startUrl = "https://music.youtube.com"
+    private val googleLoginUrl =
+        "https://accounts.google.com/ServiceLogin?service=youtube&continue=https%3A%2F%2Fmusic.youtube.com%2F"
     private val sanitizeUa = true
 
-    // Firefox Android UA bypasses Chromium/WebView attestation checks on accounts.google.com
-    private val firefoxAndroidUa =
-        "Mozilla/5.0 (Android 14; Mobile; rv:132.0) Gecko/132.0 Firefox/132.0"
+    // Keep one consistent Chrome Mobile UA across all redirects to prevent Google Sign-In auto-refresh loops
     private val chromeAndroidUa =
         "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.6723.107 Mobile Safari/537.36"
 
@@ -94,7 +95,7 @@ class MainActivity : AppCompatActivity() {
         }
         root.addView(webView)
 
-        // Floating Back / Home bar shown automatically whenever outside music.youtube.com
+        // Floating Back / Home / External Browser Login bar shown automatically whenever outside music.youtube.com
         floatingNavBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setBackgroundColor(Color.parseColor("#E6121318"))
@@ -107,37 +108,48 @@ class MainActivity : AppCompatActivity() {
             textSize = 12f
             setTextColor(Color.WHITE)
             setBackgroundColor(Color.parseColor("#33FFFFFF"))
-            setPadding(24, 8, 24, 8)
+            setPadding(20, 8, 20, 8)
             setOnClickListener {
                 if (webView.canGoBack()) webView.goBack() else loadMusicHome()
             }
         }
         val homeBtn = Button(this).apply {
-            text = "⌂ 音乐首页"
+            text = "⌂ 首页"
             textSize = 12f
             setTextColor(Color.WHITE)
             setBackgroundColor(Color.parseColor("#FF0033"))
-            setPadding(24, 8, 24, 8)
+            setPadding(20, 8, 20, 8)
             setOnClickListener { loadMusicHome() }
+        }
+        externalLoginButton = Button(this).apply {
+            text = "外部浏览器登录"
+            textSize = 12f
+            setTextColor(Color.WHITE)
+            setBackgroundColor(Color.parseColor("#2563EB"))
+            setPadding(20, 8, 20, 8)
+            visibility = View.GONE
+            setOnClickListener { openExternalBrowserLogin() }
         }
         cookieFallbackButton = Button(this).apply {
             text = "粘贴 Cookie"
             textSize = 12f
             setTextColor(Color.WHITE)
             setBackgroundColor(Color.parseColor("#33FFFFFF"))
-            setPadding(24, 8, 24, 8)
+            setPadding(20, 8, 20, 8)
             visibility = View.GONE
             setOnClickListener { showCookieImportDialog() }
         }
 
         val spacer = {
             View(this).apply {
-                layoutParams = LinearLayout.LayoutParams(12, 1)
+                layoutParams = LinearLayout.LayoutParams(10, 1)
             }
         }
         floatingNavBar.addView(backBtn)
         floatingNavBar.addView(spacer())
         floatingNavBar.addView(homeBtn)
+        floatingNavBar.addView(spacer())
+        floatingNavBar.addView(externalLoginButton)
         floatingNavBar.addView(spacer())
         floatingNavBar.addView(cookieFallbackButton)
 
@@ -162,10 +174,16 @@ class MainActivity : AppCompatActivity() {
         ContextCompat.registerReceiver(this, mediaControlReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
     }
 
-    private fun loadMusicHome() {
-        if (sanitizeUa) {
-            webView.settings.userAgentString = chromeAndroidUa
+    private fun openExternalBrowserLogin() {
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(googleLoginUrl)))
+            Toast.makeText(this, "已在外部浏览器打开登录页，登录完成后可点「粘贴 Cookie」同步", Toast.LENGTH_LONG).show()
+        } catch (_: Exception) {
+            Toast.makeText(this, "未找到可用的外部浏览器", Toast.LENGTH_SHORT).show()
         }
+    }
+
+    private fun loadMusicHome() {
         webView.loadUrl(startUrl)
     }
 
@@ -173,9 +191,6 @@ class MainActivity : AppCompatActivity() {
         super.onNewIntent(intent)
         val deepLink = intent.dataString
         if (!deepLink.isNullOrBlank() && deepLink.startsWith("https://music.youtube.com")) {
-            if (sanitizeUa) {
-                webView.settings.userAgentString = chromeAndroidUa
-            }
             webView.loadUrl(deepLink)
         }
     }
@@ -223,7 +238,6 @@ class MainActivity : AppCompatActivity() {
             override fun shouldOverrideUrlLoading(v: WebView?, request: WebResourceRequest?): Boolean {
                 val url = request?.url ?: return false
                 val host = url.host.orEmpty()
-                val urlStr = url.toString()
 
                 if (!isAllowedInAppHost(host)) {
                     try {
@@ -232,18 +246,7 @@ class MainActivity : AppCompatActivity() {
                     return true
                 }
 
-                if (sanitizeUa && v != null) {
-                    if (isGoogleAuthHost(host) && v.settings.userAgentString != firefoxAndroidUa) {
-                        v.settings.userAgentString = firefoxAndroidUa
-                        v.loadUrl(urlStr)
-                        return true
-                    } else if (host.equals("music.youtube.com", ignoreCase = true) && v.settings.userAgentString != chromeAndroidUa) {
-                        v.settings.userAgentString = chromeAndroidUa
-                        v.loadUrl(urlStr)
-                        return true
-                    }
-                }
-
+                // Never mutate UA or call v.loadUrl() mid-redirect — let Chromium follow Google Sign-In hops cleanly
                 return false
             }
 
@@ -255,8 +258,10 @@ class MainActivity : AppCompatActivity() {
                     ""
                 }
                 val onMusic = host.equals("music.youtube.com", ignoreCase = true)
+                val isAuth = isGoogleAuthHost(host)
                 floatingNavBar.visibility = if (onMusic) View.GONE else View.VISIBLE
-                cookieFallbackButton.visibility = if (isGoogleAuthHost(host)) View.VISIBLE else View.GONE
+                externalLoginButton.visibility = if (isAuth) View.VISIBLE else View.GONE
+                cookieFallbackButton.visibility = if (isAuth) View.VISIBLE else View.GONE
             }
 
             override fun onPageFinished(v: WebView?, url: String?) {
@@ -274,8 +279,8 @@ class MainActivity : AppCompatActivity() {
             maxLines = 6
         }
         AlertDialog.Builder(this)
-            .setTitle("从浏览器同步登录 Cookie")
-            .setMessage("如账号开启严格安全拦截，可在桌面或手机浏览器登录 music.youtube.com 后复制 Cookie 字符串粘贴到此处：")
+            .setTitle("从外部浏览器同步登录 Cookie")
+            .setMessage("如账号开启严格安全拦截，可点下方「打开外部浏览器」登录 music.youtube.com，再复制 Cookie 字符串粘贴到此处：")
             .setView(input)
             .setPositiveButton("导入并刷新") { _, _ ->
                 val raw = input.text?.toString()?.trim().orEmpty().replace(Regex("^cookie:\\s*", RegexOption.IGNORE_CASE), "")
@@ -298,6 +303,9 @@ class MainActivity : AppCompatActivity() {
                 cm.flush()
                 loadMusicHome()
                 Toast.makeText(this, "已导入 $count 条 Cookie，正在加载主页", Toast.LENGTH_SHORT).show()
+            }
+            .setNeutralButton("打开外部浏览器") { _, _ ->
+                openExternalBrowserLogin()
             }
             .setNegativeButton("取消", null)
             .show()

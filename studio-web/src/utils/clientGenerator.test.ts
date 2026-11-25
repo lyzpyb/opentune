@@ -88,13 +88,25 @@ test('generateClientProjectFiles emits macOS DMG, Android APK, and GitHub Action
   assert.match(macMain.content, /persist:ytmusic/);
   assert.match(macMain.content, /http:\/\/127\.0\.0\.1:7890/);
   assert.match(macMain.content, /MediaPlayPause/);
-  assert.match(macMain.content, /Firefox\/132\.0/);
+  assert.doesNotMatch(macMain.content, /Firefox\/132\.0/);
+  assert.match(macMain.content, /startExternalBrowserLogin/);
+  assert.match(macMain.content, /Storage\.getCookies/);
+  assert.match(macMain.content, /openAuthWindow/);
   assert.match(macMain.content, /sec-ch-ua/);
   assert.match(macMain.content, /importCookiesFromClipboard/);
   assert.match(macMain.content, /powerSaveBlocker/);
   assert.match(macMain.content, /mediaKeySystem/);
   assert.match(macMain.content, /toggleTrayPopover/);
   assert.match(macMain.content, /isAllowedInAppUrl/);
+
+  const macAuthHtml = files.find((f) => f.path === 'macos-electron/src/auth.html');
+  assert.ok(macAuthHtml);
+  assert.match(macAuthHtml.content, /startExternalBrowser/);
+  assert.match(macAuthHtml.content, /openDefaultBrowser/);
+
+  const macAuthPreload = files.find((f) => f.path === 'macos-electron/src/auth-preload.js');
+  assert.ok(macAuthPreload);
+  assert.match(macAuthPreload.content, /ytmAuthBridge/);
 
   const macTrayHtml = files.find((f) => f.path === 'macos-electron/src/tray.html');
   assert.ok(macTrayHtml);
@@ -109,7 +121,8 @@ test('generateClientProjectFiles emits macOS DMG, Android APK, and GitHub Action
   const androidMain = files.find((f) => f.path === 'android-webview/app/src/main/java/com/studio/mymusic/MainActivity.kt');
   assert.ok(androidMain);
   assert.match(androidMain.content, /package com\.studio\.mymusic/);
-  assert.match(androidMain.content, /Firefox\/132\.0/);
+  assert.doesNotMatch(androidMain.content, /Firefox\/132\.0/);
+  assert.match(androidMain.content, /openExternalBrowserLogin/);
   assert.match(androidMain.content, /setRequestedWithHeaderOriginAllowList/);
   assert.match(androidMain.content, /showCookieImportDialog/);
   assert.match(androidMain.content, /setAcceptThirdPartyCookies/);
