@@ -1,0 +1,30 @@
+appId: org.opentune.client
+productName: "OpenTune"
+directories:
+  output: dist
+files:
+  - src/**/*
+  - package.json
+mac:
+  category: public.app-category.music
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: entitlements.mac.plist
+  entitlementsInherit: entitlements.mac.plist
+  target:
+    - target: dmg
+      arch:
+        - universal
+dmg:
+  artifactName: "opentune-1.1.0-${arch}.dmg"
+  window:
+    width: 540
+    height: 380
+  contents:
+    - x: 140
+      y: 190
+      type: file
+    - x: 400
+      y: 190
+      type: link
+      path: /Applications

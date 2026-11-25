@@ -1,0 +1,40 @@
+import type { SampleTrack } from '../types/client';
+
+export const SAMPLE_TRACKS: SampleTrack[] = [
+  {
+    id: 'lofi-tokyo',
+    title: 'Midnight Rain · Lofi Beats to Study & Relax',
+    artist: 'Lofi Girl · YouTube Music Radio',
+    album: 'Nocturnal Sessions',
+    duration: '04:18',
+    durationSec: 258,
+    videoId: 'jfKfPfyJRdk',
+    ytmUrl: 'https://music.youtube.com/watch?v=jfKfPfyJRdk',
+    coverSrc: '/src/assets/images/album_cover_midnight_1795487024026.jpg',
+    bitrateLabel: '256 kbps AAC · Premium',
+  },
+  {
+    id: 'acoustic-studio',
+    title: 'Unplugged Studio Session · Warm Acoustic',
+    artist: 'Acoustic Sessions Live',
+    album: 'Studio 4B Recordings',
+    duration: '03:52',
+    durationSec: 232,
+    videoId: '5qap5aO4i9A',
+    ytmUrl: 'https://music.youtube.com/watch?v=5qap5aO4i9A',
+    coverSrc: '/src/assets/images/album_cover_acoustic_1795487025551.jpg',
+    bitrateLabel: '256 kbps Opus · Premium',
+  },
+  {
+    id: 'synth-horizon',
+    title: 'Anodized Pulse · Deep Synthwave Focus',
+    artist: 'Nightdrive Collective',
+    album: 'Monolith Vol. II',
+    duration: '05:06',
+    durationSec: 306,
+    videoId: '4xDzrJKXOOY',
+    ytmUrl: 'https://music.youtube.com/watch?v=4xDzrJKXOOY',
+    coverSrc: '/src/assets/images/album_cover_synth_1795487025170.jpg',
+    bitrateLabel: '256 kbps Opus · Premium',
+  },
+];

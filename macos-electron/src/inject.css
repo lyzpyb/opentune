@@ -1,0 +1,31 @@
+/* macOS Native Window Integration */
+ytmusic-nav-bar {
+  -webkit-app-region: drag;
+  padding-left: 204px !important;
+}
+
+ytmusic-nav-bar a,
+ytmusic-nav-bar button,
+ytmusic-nav-bar input,
+ytmusic-search-box,
+ytmusic-settings-button {
+  -webkit-app-region: no-drag;
+}
+
+/* Hide redundant upgrade / get-app prompts inside native desktop wrapper */
+ytmusic-mealbar-promo-renderer,
+ytmusic-pivot-bar-item-renderer[tab-id="SPunlimited"],
+tp-yt-paper-dialog:has(ytmusic-upsell-dialog-renderer) {
+  display: none !important;
+}
+
+/* Refined dark scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+}

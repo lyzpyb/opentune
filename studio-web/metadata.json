@@ -1,0 +1,8 @@
+{
+  "name": "YTM Native Studio — YouTube Music 跨平台客户端工坊",
+  "description": "面向 macOS (.dmg) 与 Android (.apk) 的 YouTube Music 网页接口原生封装客户端开发与打包工坊，完整保留 YouTube Premium 会员权益、后台播放与系统媒体控制。",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

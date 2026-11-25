@@ -1,0 +1,96 @@
+name: Build OpenTune (macOS DMG & Android APK)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos-dmg:
+    name: Build macOS (.dmg)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies & package DMG
+        working-directory: macos-electron
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: |
+          npm install
+          npm run dist:mac
+
+      - name: Upload macOS DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: opentune-macos-dmg
+          path: macos-electron/dist/*.dmg
+
+  build-android-apk:
+    name: Build Android (.apk)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Gradle 8.10.2
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.10.2
+
+      - name: Build Android APK
+        working-directory: android-webview
+        run: |
+          if [ -n "${ANDROID_HOME:-}" ] && [ -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
+            yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null 2>&1 || true
+          fi
+          gradle assembleRelease
+
+      - name: Upload Android APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: opentune-android-apk
+          path: android-webview/app/build/outputs/apk/release/*.apk
+
+  publish-release:
+    name: Publish Direct DMG & APK Release
+    needs:
+      - build-macos-dmg
+      - build-android-apk
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all built binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Collect .dmg and .apk files
+        run: |
+          mkdir -p dist-release
+          find release-assets -type f \( -name "*.dmg" -o -name "*.apk" \) -exec cp {} dist-release/ \;
+          ls -lh dist-release/
+
+      - name: Create or update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.1.0-latest
+          name: "OpenTune v1.1.0 (macOS .dmg + Android .apk)"
+          body: "由 YTM Native Studio 自动构建发布，包含 macOS 安装镜像 (.dmg) 与 Android 安装包 (.apk)，直连官方 https://music.youtube.com 保留完整 YouTube Premium 权益。"
+          files: dist-release/*
