@@ -42,8 +42,8 @@ class MediaPlaybackService : Service() {
 
         mediaSession = MediaSessionCompat(this, "YtmNativeMediaSession").apply {
             setCallback(object : MediaSessionCompat.Callback() {
-                override fun onPlay() = broadcastCommand("toggle")
-                override fun onPause() = broadcastCommand("toggle")
+                override fun onPlay() = broadcastCommand("play")
+                override fun onPause() = broadcastCommand("pause")
                 override fun onSkipToNext() = broadcastCommand("next")
                 override fun onSkipToPrevious() = broadcastCommand("previous")
             })
@@ -63,6 +63,8 @@ class MediaPlaybackService : Service() {
                 updateWakeLock(isPlaying)
                 updateMediaSessionAndNotification()
             }
+            "CMD_PLAY" -> broadcastCommand("play")
+            "CMD_PAUSE" -> broadcastCommand("pause")
             "CMD_TOGGLE" -> broadcastCommand("toggle")
             "CMD_NEXT" -> broadcastCommand("next")
             "CMD_PREV" -> broadcastCommand("previous")
@@ -132,7 +134,7 @@ class MediaPlaybackService : Service() {
         )
 
         val prevIntent = serviceActionPendingIntent("CMD_PREV", 1)
-        val toggleIntent = serviceActionPendingIntent("CMD_TOGGLE", 2)
+        val playPauseIntent = serviceActionPendingIntent(if (isPlaying) "CMD_PAUSE" else "CMD_PLAY", 2)
         val nextIntent = serviceActionPendingIntent("CMD_NEXT", 3)
 
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
@@ -146,7 +148,7 @@ class MediaPlaybackService : Service() {
             .addAction(
                 if (isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play,
                 if (isPlaying) "暂停" else "播放",
-                toggleIntent
+                playPauseIntent
             )
             .addAction(android.R.drawable.ic_media_next, "下一首", nextIntent)
             .setStyle(

@@ -16,7 +16,7 @@ mac:
       arch:
         - universal
 dmg:
-  artifactName: "opentune-1.1.0-${arch}.dmg"
+  artifactName: "opentune-${version}-${arch}.dmg"
   window:
     width: 540
     height: 380

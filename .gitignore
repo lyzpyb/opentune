@@ -1,0 +1,24 @@
+# OS & Editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Signing keys & secrets (never commit!)
+.local-keys/
+*.jks
+*.keystore
+*.p12
+.env
+.env.*
+
+# Node / Electron / Web
+node_modules/
+macos-electron/dist/
+studio-web/dist/
+
+# Android / Gradle
+android-webview/.gradle/
+android-webview/build/
+android-webview/app/build/
+android-webview/local.properties

@@ -359,6 +359,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun dispatchJsPlaybackCommand(command: String) {
         val script = when (command) {
+            "play" -> "(function(){ const v = document.querySelector('video, audio'); if (v) { if (v.paused) { v.play().catch(function(){ document.querySelector('#play-pause-button, .play-pause-button')?.click(); }); } } else { document.querySelector('#play-pause-button, .play-pause-button')?.click(); } })();"
+            "pause" -> "(function(){ const v = document.querySelector('video, audio'); if (v) { if (!v.paused) { v.pause(); } } })();"
             "toggle" -> "(function(){ const btn = document.querySelector('#play-pause-button, .play-pause-button'); if (btn) { btn.click(); } else { const v = document.querySelector('video, audio'); if (v) v.paused ? v.play() : v.pause(); } })();"
             "next" -> "document.querySelector('.next-button')?.click();"
             "previous" -> "document.querySelector('.previous-button')?.click();"
