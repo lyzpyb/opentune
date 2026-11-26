@@ -36,6 +36,7 @@ const ENABLE_MEDIA_KEYS = true;
 const CLOSE_TO_TRAY = true;
 const HIDDEN_TITLEBAR = true;
 const PROXY_SERVER = "";
+const MEDIA_SHORTCUTS = ['MediaPlayPause', 'MediaNextTrack', 'MediaPreviousTrack'];
 
 const CHROME_VERSION = process.versions.chrome || '130.0.0.0';
 const CHROME_MAC_UA = `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${CHROME_VERSION} Safari/537.36`;
@@ -46,6 +47,47 @@ let trayWindow = null;
 let authWindow = null;
 let isQuitting = false;
 let powerBlockerId = null;
+let mediaKeysEnabled = ENABLE_MEDIA_KEYS;
+
+function getSettingsPath() {
+  return path.join(app.getPath('userData'), 'settings.json');
+}
+
+function loadSettings() {
+  try {
+    const filePath = getSettingsPath();
+    if (!fs.existsSync(filePath)) return;
+    const raw = fs.readFileSync(filePath, 'utf-8');
+    const parsed = JSON.parse(raw);
+    if (typeof parsed.enableMediaKeys === 'boolean') {
+      mediaKeysEnabled = parsed.enableMediaKeys;
+    }
+  } catch (_) {}
+}
+
+function saveSettings(partial) {
+  try {
+    const filePath = getSettingsPath();
+    let current = {};
+    if (fs.existsSync(filePath)) {
+      try {
+        current = JSON.parse(fs.readFileSync(filePath, 'utf-8')) || {};
+      } catch (_) {
+        current = {};
+      }
+    }
+    const merged = { ...current, ...partial };
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, JSON.stringify(merged, null, 2), 'utf-8');
+  } catch (_) {}
+}
+
+function setMediaKeysEnabled(enabled) {
+  mediaKeysEnabled = Boolean(enabled);
+  saveSettings({ enableMediaKeys: mediaKeysEnabled });
+  applyMediaShortcuts(mediaKeysEnabled);
+  setupAppMenu();
+}
 
 let activeAuthSession = null;
 
@@ -836,6 +878,30 @@ function setupAppMenu() {
       ],
     },
     {
+      label: '播放',
+      submenu: [
+        {
+          label: '播放 / 暂停',
+          click: () => sendPlayerCommand('toggle'),
+        },
+        {
+          label: '上一首',
+          click: () => sendPlayerCommand('previous'),
+        },
+        {
+          label: '下一首',
+          click: () => sendPlayerCommand('next'),
+        },
+        { type: 'separator' },
+        {
+          label: '启用全局媒体键（后台响应键盘/耳机）',
+          type: 'checkbox',
+          checked: mediaKeysEnabled,
+          click: (menuItem) => setMediaKeysEnabled(menuItem.checked),
+        },
+      ],
+    },
+    {
       label: '账号',
       submenu: [
         {
@@ -987,6 +1053,13 @@ function setupTray() {
       },
       { type: 'separator' },
       {
+        label: '启用全局媒体键',
+        type: 'checkbox',
+        checked: mediaKeysEnabled,
+        click: (menuItem) => setMediaKeysEnabled(menuItem.checked),
+      },
+      { type: 'separator' },
+      {
         label: '退出客户端',
         click: () => {
           isQuitting = true;
@@ -998,11 +1071,18 @@ function setupTray() {
   });
 }
 
-function registerMediaShortcuts() {
-  if (!ENABLE_MEDIA_KEYS) return;
+function applyMediaShortcuts(enabled) {
+  for (const shortcut of MEDIA_SHORTCUTS) {
+    globalShortcut.unregister(shortcut);
+  }
+  if (!enabled) return;
   globalShortcut.register('MediaPlayPause', () => sendPlayerCommand('toggle'));
   globalShortcut.register('MediaNextTrack', () => sendPlayerCommand('next'));
   globalShortcut.register('MediaPreviousTrack', () => sendPlayerCommand('previous'));
+}
+
+function registerMediaShortcuts() {
+  applyMediaShortcuts(mediaKeysEnabled);
 }
 
 async function createMainWindow() {
@@ -1200,6 +1280,7 @@ ipcMain.on('ytm:auth-cancel', () => {
 });
 
 app.whenReady().then(async () => {
+  loadSettings();
   setupAppMenu();
   await createMainWindow();
   setupTray();
