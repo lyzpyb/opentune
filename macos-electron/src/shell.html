@@ -215,6 +215,68 @@
         transform: translateX(14px);
       }
 
+      .update-banner {
+        display: none;
+        flex-direction: column;
+        gap: 6px;
+        padding: 9px 10px;
+        border-radius: 10px;
+        background: rgba(255, 0, 51, 0.12);
+        border: 1px solid rgba(255, 0, 51, 0.3);
+      }
+
+      .update-banner.visible {
+        display: flex;
+      }
+
+      .update-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+
+      .update-text {
+        font-size: 11.5px;
+        font-weight: 600;
+        color: #ffffff;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .update-btn {
+        appearance: none;
+        border: none;
+        background: var(--accent);
+        color: #ffffff;
+        font-size: 11px;
+        font-weight: 600;
+        padding: 4px 9px;
+        border-radius: 6px;
+        cursor: pointer;
+        flex-shrink: 0;
+      }
+
+      .update-btn:hover { background: var(--accent-hover); }
+      .update-btn:disabled { opacity: 0.6; cursor: default; }
+
+      .update-progress {
+        width: 100%;
+        height: 3px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.14);
+        overflow: hidden;
+        display: none;
+      }
+
+      .update-progress-fill {
+        height: 100%;
+        width: 0%;
+        background: #ff3355;
+        transition: width 150ms linear;
+      }
+
       .account-card {
         margin-top: 4px;
         padding: 8px 10px;
@@ -910,6 +972,16 @@
             <div id="desktopLyricsSwitch" class="switch"></div>
           </div>
 
+          <div id="updateBanner" class="update-banner">
+            <div class="update-row">
+              <span id="updateText" class="update-text">发现新版本</span>
+              <button id="updateActionBtn" class="update-btn">更新</button>
+            </div>
+            <div id="updateProgress" class="update-progress">
+              <div id="updateProgressFill" class="update-progress-fill"></div>
+            </div>
+          </div>
+
           <div class="account-card">
             <div class="account-avatar">
               <img id="sidebarAvatarImg" alt="账号头像" />
@@ -1437,6 +1509,45 @@
         }
 
         updateActiveLyricLine(false);
+      });
+
+      const updateBanner = document.getElementById('updateBanner');
+      const updateText = document.getElementById('updateText');
+      const updateActionBtn = document.getElementById('updateActionBtn');
+      const updateProgress = document.getElementById('updateProgress');
+      const updateProgressFill = document.getElementById('updateProgressFill');
+
+      updateActionBtn.addEventListener('click', () => {
+        updateActionBtn.disabled = true;
+        window.opentuneShell.startUpdate();
+      });
+
+      window.opentuneShell.onUpdateState((state) => {
+        if (!state) return;
+        const show = ['available', 'downloading', 'installing', 'error'].includes(state.status);
+        updateBanner.classList.toggle('visible', show);
+        if (!show) return;
+
+        updateText.textContent = state.message || (state.latestVersion ? `发现新版本 v${state.latestVersion}` : '发现新版本');
+        if (state.status === 'available') {
+          updateActionBtn.textContent = '更新';
+          updateActionBtn.disabled = false;
+          updateProgress.style.display = 'none';
+        } else if (state.status === 'downloading') {
+          updateActionBtn.textContent = `${state.progress || 0}%`;
+          updateActionBtn.disabled = true;
+          updateProgress.style.display = 'block';
+          updateProgressFill.style.width = `${state.progress || 0}%`;
+        } else if (state.status === 'installing') {
+          updateActionBtn.textContent = '重启中';
+          updateActionBtn.disabled = true;
+          updateProgress.style.display = 'block';
+          updateProgressFill.style.width = '100%';
+        } else if (state.status === 'error') {
+          updateActionBtn.textContent = '重试';
+          updateActionBtn.disabled = false;
+          updateProgress.style.display = 'none';
+        }
       });
 
       window.opentuneShell.requestInitialState();

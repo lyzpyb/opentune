@@ -23,6 +23,7 @@ const https = require('https');
 const net = require('net');
 const os = require('os');
 const path = require('path');
+const { createUpdater } = require('./updater');
 
 // Prevent Chromium/macOS from throttling background audio timers or blocking autoplay across track transitions
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
@@ -76,6 +77,18 @@ function broadcastAccountState() {
     mainWindow.webContents.send('ytm:account-state', accountState);
   }
 }
+
+const updater = createUpdater({
+  onStateChange(updateState) {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('ytm:update-state', updateState);
+    }
+  },
+  onBeforeQuit() {
+    isQuitting = true;
+  },
+  getMainWindow: () => mainWindow,
+});
 
 async function refreshAccountFromCookies() {
   try {
@@ -1205,6 +1218,10 @@ function setupAppMenu() {
             label: APP_NAME,
             submenu: [
               { role: 'about' },
+              {
+                label: '检查更新…',
+                click: () => updater.checkForUpdates({ silent: false }),
+              },
               { type: 'separator' },
               { role: 'hide' },
               { role: 'hideOthers' },
@@ -1704,12 +1721,23 @@ ipcMain.on('ytm:shell-logout', () => {
   logoutAccount().catch(() => {});
 });
 
+ipcMain.on('ytm:update-check', () => {
+  updater.checkForUpdates({ silent: false });
+});
+
+ipcMain.on('ytm:update-start', () => {
+  updater.startUpdate();
+});
+
 ipcMain.on('ytm:shell-ready', () => {
   broadcastSettings();
   broadcastNavState();
   broadcastTrackToTray();
   broadcastLyricsState();
   broadcastAccountState();
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('ytm:update-state', updater.getState());
+  }
   refreshAccountFromCookies().catch(() => {});
 });
 
@@ -1781,6 +1809,7 @@ app.whenReady().then(async () => {
   setupTray();
   registerMediaShortcuts();
   refreshAccountFromCookies().catch(() => {});
+  setTimeout(() => updater.checkForUpdates({ silent: true }), 6000);
   if (desktopLyricsEnabled) {
     createLyricsWindow();
   }

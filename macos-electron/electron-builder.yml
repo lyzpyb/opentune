@@ -9,12 +9,16 @@ files:
 mac:
   icon: build/icon.icns
   category: public.app-category.music
+  artifactName: "opentune-${version}-${arch}.${ext}"
   hardenedRuntime: true
   gatekeeperAssess: false
   entitlements: entitlements.mac.plist
   entitlementsInherit: entitlements.mac.plist
   target:
     - target: dmg
+      arch:
+        - universal
+    - target: zip
       arch:
         - universal
 dmg:

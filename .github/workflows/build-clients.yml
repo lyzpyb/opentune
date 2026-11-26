@@ -96,11 +96,13 @@ jobs:
           npm install
           npm run dist:mac
 
-      - name: Upload macOS DMG artifact
+      - name: Upload macOS DMG & ZIP artifacts
         uses: actions/upload-artifact@v4
         with:
           name: opentune-macos-dmg
-          path: macos-electron/dist/*.dmg
+          path: |
+            macos-electron/dist/*.dmg
+            macos-electron/dist/*.zip
 
   build-android-apk:
     name: Build Android (.apk)
@@ -181,10 +183,10 @@ jobs:
         with:
           path: release-assets
 
-      - name: Collect .dmg and .apk files
+      - name: Collect .dmg, .zip and .apk files
         run: |
           mkdir -p dist-release
-          find release-assets -type f \( -name "*.dmg" -o -name "*.apk" \) -exec cp {} dist-release/ \;
+          find release-assets -type f \( -name "*.dmg" -o -name "*.zip" -o -name "*.apk" \) -exec cp {} dist-release/ \;
           ls -lh dist-release/
 
       - name: Create or update GitHub Release

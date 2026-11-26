@@ -13,6 +13,12 @@ contextBridge.exposeInMainWorld('opentuneShell', {
   logout() {
     ipcRenderer.send('ytm:shell-logout');
   },
+  checkForUpdates() {
+    ipcRenderer.send('ytm:update-check');
+  },
+  startUpdate() {
+    ipcRenderer.send('ytm:update-start');
+  },
   setMediaKeysEnabled(enabled) {
     ipcRenderer.send('ytm:shell-set-media-keys', Boolean(enabled));
   },
@@ -44,5 +50,9 @@ contextBridge.exposeInMainWorld('opentuneShell', {
   onAccountState(callback) {
     if (typeof callback !== 'function') return;
     ipcRenderer.on('ytm:account-state', (_event, payload) => callback(payload));
+  },
+  onUpdateState(callback) {
+    if (typeof callback !== 'function') return;
+    ipcRenderer.on('ytm:update-state', (_event, payload) => callback(payload));
   },
 });

@@ -8,10 +8,10 @@
   "license": "MIT",
   "scripts": {
     "start": "electron .",
-    "dist:mac": "electron-builder --mac dmg --universal",
-    "dist:mac:arm64": "electron-builder --mac dmg --arm64",
-    "dist:mac:x64": "electron-builder --mac dmg --x64",
-    "dist:mac:universal": "electron-builder --mac dmg --universal"
+    "dist:mac": "electron-builder --mac dmg zip --universal",
+    "dist:mac:arm64": "electron-builder --mac dmg zip --arm64",
+    "dist:mac:x64": "electron-builder --mac dmg zip --x64",
+    "dist:mac:universal": "electron-builder --mac dmg zip --universal"
   },
   "devDependencies": {
     "electron": "^33.2.0",
