@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>OpenTune Desktop Lyrics</title>
+    <style>
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+        user-select: none;
+      }
+
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: transparent;
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "PingFang SC", "Helvetica Neue", sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      .overlay-card {
+        width: 100%;
+        height: 100%;
+        padding: 10px 22px 12px;
+        border-radius: 16px;
+        background: rgba(12, 13, 18, 0.34);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 4px;
+        -webkit-app-region: drag;
+        transition: background 180ms ease, border-color 180ms ease;
+        position: relative;
+      }
+
+      .overlay-card:hover {
+        background: rgba(12, 13, 18, 0.78);
+        border-color: rgba(255, 255, 255, 0.16);
+      }
+
+      .hover-bar {
+        position: absolute;
+        top: 6px;
+        right: 10px;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        opacity: 0;
+        transition: opacity 150ms ease;
+        -webkit-app-region: no-drag;
+      }
+
+      .overlay-card:hover .hover-bar {
+        opacity: 1;
+      }
+
+      .mini-btn {
+        appearance: none;
+        border: none;
+        background: rgba(255, 255, 255, 0.08);
+        color: #f4f4f5;
+        width: 24px;
+        height: 24px;
+        border-radius: 6px;
+        font-size: 11px;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        transition: background 120ms ease;
+      }
+
+      .mini-btn:hover {
+        background: rgba(255, 255, 255, 0.2);
+      }
+
+      .line-current {
+        max-width: 100%;
+        font-size: 21px;
+        font-weight: 700;
+        color: #ffffff;
+        text-align: center;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        text-shadow: 0 2px 10px rgba(0, 0, 0, 0.78), 0 0 2px rgba(0, 0, 0, 0.9);
+        letter-spacing: -0.01em;
+      }
+
+      .line-next {
+        max-width: 100%;
+        font-size: 13px;
+        font-weight: 500;
+        color: rgba(244, 244, 245, 0.72);
+        text-align: center;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        text-shadow: 0 1px 6px rgba(0, 0, 0, 0.75);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="overlay-card">
+      <div class="hover-bar">
+        <button id="prevBtn" class="mini-btn" title="上一首">⏮</button>
+        <button id="playBtn" class="mini-btn" title="播放 / 暂停">▶</button>
+        <button id="nextBtn" class="mini-btn" title="下一首">⏭</button>
+        <button id="closeBtn" class="mini-btn" title="关闭桌面歌词">✕</button>
+      </div>
+      <div id="lineCurrent" class="line-current">OpenTune 桌面歌词</div>
+      <div id="lineNext" class="line-next">播放音乐后将自动同步显示歌词</div>
+    </div>
+
+    <script>
+      const lineCurrent = document.getElementById('lineCurrent');
+      const lineNext = document.getElementById('lineNext');
+      const prevBtn = document.getElementById('prevBtn');
+      const playBtn = document.getElementById('playBtn');
+      const nextBtn = document.getElementById('nextBtn');
+      const closeBtn = document.getElementById('closeBtn');
+
+      let trackState = { title: '未在播放', artist: 'OpenTune', playing: false, currentTime: 0 };
+      let lyricsState = { status: 'idle', synced: [], plain: '' };
+
+      prevBtn.addEventListener('click', () => window.opentuneLyricsOverlay.sendCommand('previous'));
+      playBtn.addEventListener('click', () => window.opentuneLyricsOverlay.sendCommand('toggle'));
+      nextBtn.addEventListener('click', () => window.opentuneLyricsOverlay.sendCommand('next'));
+      closeBtn.addEventListener('click', () => window.opentuneLyricsOverlay.closeOverlay());
+
+      function renderOverlay() {
+        playBtn.textContent = trackState.playing ? '⏸' : '▶';
+
+        if (!trackState.title || trackState.title === '未在播放') {
+          lineCurrent.textContent = 'OpenTune 桌面歌词';
+          lineNext.textContent = '播放音乐后将自动同步显示歌词';
+          return;
+        }
+
+        const synced = Array.isArray(lyricsState.synced) ? lyricsState.synced : [];
+        if (synced.length > 0) {
+          const curTime = Number(trackState.currentTime) || 0;
+          let activeIdx = -1;
+          for (let i = 0; i < synced.length; i += 1) {
+            if (curTime + 0.2 >= synced[i].time) {
+              activeIdx = i;
+            } else {
+              break;
+            }
+          }
+          if (activeIdx === -1) {
+            lineCurrent.textContent = trackState.title;
+            lineNext.textContent = synced[0]?.text || trackState.artist || '';
+          } else {
+            lineCurrent.textContent = synced[activeIdx].text || '♪';
+            lineNext.textContent = synced[activeIdx + 1]?.text || '';
+          }
+          return;
+        }
+
+        if (lyricsState.status === 'loading') {
+          lineCurrent.textContent = trackState.title;
+          lineNext.textContent = '正在匹配时间轴歌词...';
+          return;
+        }
+
+        lineCurrent.textContent = trackState.title;
+        lineNext.textContent = trackState.artist || '暂无时间轴歌词';
+      }
+
+      window.opentuneLyricsOverlay.onTrackState((state) => {
+        if (!state) return;
+        trackState = state;
+        renderOverlay();
+      });
+
+      window.opentuneLyricsOverlay.onLyricsState((state) => {
+        if (!state) return;
+        lyricsState = state;
+        renderOverlay();
+      });
+
+      window.opentuneLyricsOverlay.requestState();
+    </script>
+  </body>
+</html>

@@ -18,6 +18,7 @@ const { spawn } = require('child_process');
 const crypto = require('crypto');
 const fs = require('fs');
 const http = require('http');
+const https = require('https');
 const net = require('net');
 const os = require('os');
 const path = require('path');
@@ -49,10 +50,20 @@ let mainWindow = null;
 let musicView = null;
 let tray = null;
 let trayWindow = null;
+let lyricsWindow = null;
 let authWindow = null;
 let isQuitting = false;
 let powerBlockerId = null;
 let mediaKeysEnabled = ENABLE_MEDIA_KEYS;
+let desktopLyricsEnabled = false;
+let isImmersiveOpen = false;
+const lyricsCache = new Map();
+let currentLyrics = {
+  key: '',
+  status: 'idle',
+  synced: [],
+  plain: '',
+};
 
 function getMusicWebContents() {
   if (!musicView || !musicView.webContents || musicView.webContents.isDestroyed()) return null;
@@ -83,6 +94,9 @@ function loadSettings() {
     if (typeof parsed.enableMediaKeys === 'boolean') {
       mediaKeysEnabled = parsed.enableMediaKeys;
     }
+    if (typeof parsed.desktopLyricsEnabled === 'boolean') {
+      desktopLyricsEnabled = parsed.desktopLyricsEnabled;
+    }
   } catch (_) {}
 }
 
@@ -107,7 +121,18 @@ function broadcastSettings() {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('ytm:settings-state', {
       enableMediaKeys: mediaKeysEnabled,
+      desktopLyricsEnabled,
+      immersiveOpen: isImmersiveOpen,
     });
+  }
+}
+
+function broadcastLyricsState() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('ytm:lyrics-state', currentLyrics);
+  }
+  if (lyricsWindow && !lyricsWindow.isDestroyed()) {
+    lyricsWindow.webContents.send('ytm:lyrics-state', currentLyrics);
   }
 }
 
@@ -117,6 +142,205 @@ function setMediaKeysEnabled(enabled) {
   applyMediaShortcuts(mediaKeysEnabled);
   setupAppMenu();
   broadcastSettings();
+}
+
+function setImmersiveOpen(open) {
+  isImmersiveOpen = Boolean(open);
+  if (musicView) {
+    musicView.setVisible(!isImmersiveOpen);
+  }
+  broadcastSettings();
+  if (isImmersiveOpen) {
+    broadcastLyricsState();
+  }
+}
+
+function createLyricsWindow() {
+  if (lyricsWindow && !lyricsWindow.isDestroyed()) {
+    lyricsWindow.showInactive();
+    return lyricsWindow;
+  }
+  const display = screen.getPrimaryDisplay();
+  const workArea = display.workArea;
+  const width = Math.min(760, Math.max(480, Math.round(workArea.width * 0.52)));
+  const height = 84;
+  const x = Math.round(workArea.x + (workArea.width - width) / 2);
+  const y = Math.round(workArea.y + workArea.height - height - 28);
+
+  lyricsWindow = new BrowserWindow({
+    width,
+    height,
+    x,
+    y,
+    frame: false,
+    transparent: true,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    hasShadow: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    backgroundColor: '#00000000',
+    webPreferences: {
+      preload: path.join(__dirname, 'lyrics-overlay-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+
+  lyricsWindow.setAlwaysOnTop(true, 'floating');
+  if (process.platform === 'darwin') {
+    lyricsWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  }
+  lyricsWindow.loadFile(path.join(__dirname, 'lyrics-overlay.html'));
+  lyricsWindow.webContents.on('did-finish-load', () => {
+    broadcastTrackToTray();
+    broadcastLyricsState();
+  });
+  lyricsWindow.on('closed', () => {
+    lyricsWindow = null;
+  });
+  return lyricsWindow;
+}
+
+function setDesktopLyricsEnabled(enabled) {
+  desktopLyricsEnabled = Boolean(enabled);
+  saveSettings({ desktopLyricsEnabled });
+  if (desktopLyricsEnabled) {
+    createLyricsWindow();
+  } else if (lyricsWindow && !lyricsWindow.isDestroyed()) {
+    lyricsWindow.close();
+    lyricsWindow = null;
+  }
+  setupAppMenu();
+  broadcastSettings();
+}
+
+function httpsGetJson(rawUrl) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(
+      rawUrl,
+      {
+        headers: {
+          'User-Agent': `${APP_NAME}/1.1.0 (https://github.com/lyzpyb/opentune)`,
+          Accept: 'application/json',
+        },
+        timeout: 6000,
+      },
+      (res) => {
+        if (res.statusCode && res.statusCode >= 400) {
+          res.resume();
+          reject(new Error(`HTTP ${res.statusCode}`));
+          return;
+        }
+        let body = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => { body += chunk; });
+        res.on('end', () => {
+          try {
+            resolve(JSON.parse(body));
+          } catch (err) {
+            reject(err);
+          }
+        });
+      }
+    );
+    req.on('timeout', () => req.destroy(new Error('timeout')));
+    req.on('error', reject);
+  });
+}
+
+function normalizeArtistName(rawArtist) {
+  const str = String(rawArtist || '').trim();
+  if (!str) return '';
+  return str.split(/[•·—|]/)[0].trim();
+}
+
+function parseLrc(lrcText) {
+  if (!lrcText || typeof lrcText !== 'string') return [];
+  const lines = [];
+  const regex = /\[(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?\]/g;
+  for (const rawLine of lrcText.split(/\r?\n/)) {
+    const timestamps = [];
+    let match;
+    regex.lastIndex = 0;
+    while ((match = regex.exec(rawLine)) !== null) {
+      const mins = Number(match[1]) || 0;
+      const secs = Number(match[2]) || 0;
+      const fracStr = match[3] || '0';
+      const frac = Number(fracStr) / Math.pow(10, fracStr.length);
+      timestamps.push(mins * 60 + secs + frac);
+    }
+    const text = rawLine.replace(regex, '').trim();
+    if (!text || timestamps.length === 0) continue;
+    for (const time of timestamps) {
+      lines.push({ time, text });
+    }
+  }
+  lines.sort((a, b) => a.time - b.time);
+  return lines;
+}
+
+async function fetchLyricsForTrack(title, artist, duration) {
+  const cleanTitle = String(title || '').trim();
+  const cleanArtist = normalizeArtistName(artist);
+  if (!cleanTitle || cleanTitle === '未在播放') {
+    currentLyrics = { key: '', status: 'idle', synced: [], plain: '' };
+    broadcastLyricsState();
+    return;
+  }
+
+  const key = `${cleanTitle}|${cleanArtist}`;
+  if (currentLyrics.key === key && currentLyrics.status !== 'idle') return;
+
+  if (lyricsCache.has(key)) {
+    currentLyrics = lyricsCache.get(key);
+    broadcastLyricsState();
+    return;
+  }
+
+  currentLyrics = { key, status: 'loading', synced: [], plain: '' };
+  broadcastLyricsState();
+
+  try {
+    const params = new URLSearchParams({ track_name: cleanTitle });
+    if (cleanArtist) params.set('artist_name', cleanArtist);
+    if (Number.isFinite(duration) && duration > 0) params.set('duration', String(Math.round(duration)));
+
+    let data = null;
+    try {
+      data = await httpsGetJson(`https://lrclib.net/api/get?${params.toString()}`);
+    } catch (_) {
+      const q = cleanArtist ? `${cleanTitle} ${cleanArtist}` : cleanTitle;
+      const list = await httpsGetJson(`https://lrclib.net/api/search?q=${encodeURIComponent(q)}`);
+      if (Array.isArray(list) && list.length > 0) {
+        data = list.find((item) => item && item.syncedLyrics) || list[0];
+      }
+    }
+
+    const synced = parseLrc(data?.syncedLyrics || '');
+    const plain = typeof data?.plainLyrics === 'string' ? data.plainLyrics.trim() : '';
+    const result = {
+      key,
+      status: synced.length > 0 || plain ? 'ready' : 'not-found',
+      synced,
+      plain,
+    };
+    lyricsCache.set(key, result);
+    if (currentLyrics.key === key) {
+      currentLyrics = result;
+      broadcastLyricsState();
+    }
+  } catch (_) {
+    const fallback = { key, status: 'not-found', synced: [], plain: '' };
+    lyricsCache.set(key, fallback);
+    if (currentLyrics.key === key) {
+      currentLyrics = fallback;
+      broadcastLyricsState();
+    }
+  }
 }
 
 let activeAuthSession = null;
@@ -218,6 +442,9 @@ function broadcastTrackToTray() {
   }
   if (trayWindow && !trayWindow.isDestroyed()) {
     trayWindow.webContents.send('ytm:tray-state', currentTrack);
+  }
+  if (lyricsWindow && !lyricsWindow.isDestroyed()) {
+    lyricsWindow.webContents.send('ytm:track-state', currentTrack);
   }
 }
 
@@ -978,6 +1205,18 @@ function setupAppMenu() {
         },
         { type: 'separator' },
         {
+          label: '沉浸播放 / 实时歌词视图',
+          accelerator: 'CmdOrCtrl+L',
+          click: () => setImmersiveOpen(!isImmersiveOpen),
+        },
+        {
+          label: '显示桌面悬浮歌词',
+          type: 'checkbox',
+          checked: desktopLyricsEnabled,
+          click: (menuItem) => setDesktopLyricsEnabled(menuItem.checked),
+        },
+        { type: 'separator' },
+        {
           label: '启用全局媒体键（后台响应键盘/耳机）',
           type: 'checkbox',
           checked: mediaKeysEnabled,
@@ -1136,6 +1375,12 @@ function setupTray() {
         },
       },
       { type: 'separator' },
+      {
+        label: '显示桌面悬浮歌词',
+        type: 'checkbox',
+        checked: desktopLyricsEnabled,
+        click: (menuItem) => setDesktopLyricsEnabled(menuItem.checked),
+      },
       {
         label: '启用全局媒体键',
         type: 'checkbox',
@@ -1322,6 +1567,7 @@ async function createMainWindow() {
 ipcMain.on('ytm:track-update', (_event, payload) => {
   if (!payload || typeof payload !== 'object') return;
   const playing = Boolean(payload.playing);
+  const prevKey = `${currentTrack.title}|${normalizeArtistName(currentTrack.artist)}`;
   currentTrack = {
     title: String(payload.title || '未在播放'),
     artist: String(payload.artist || APP_NAME),
@@ -1335,6 +1581,11 @@ ipcMain.on('ytm:track-update', (_event, payload) => {
   };
   updatePowerSaveBlocker(playing);
   broadcastTrackToTray();
+
+  const nextKey = `${currentTrack.title}|${normalizeArtistName(currentTrack.artist)}`;
+  if (nextKey !== prevKey) {
+    fetchLyricsForTrack(currentTrack.title, currentTrack.artist, currentTrack.duration).catch(() => {});
+  }
 });
 
 ipcMain.on('ytm:nav-action', (_event, action) => {
@@ -1359,10 +1610,24 @@ ipcMain.on('ytm:shell-set-media-keys', (_event, enabled) => {
   setMediaKeysEnabled(Boolean(enabled));
 });
 
+ipcMain.on('ytm:shell-set-desktop-lyrics', (_event, enabled) => {
+  setDesktopLyricsEnabled(Boolean(enabled));
+});
+
+ipcMain.on('ytm:shell-set-immersive', (_event, open) => {
+  setImmersiveOpen(Boolean(open));
+});
+
 ipcMain.on('ytm:shell-ready', () => {
   broadcastSettings();
   broadcastNavState();
   broadcastTrackToTray();
+  broadcastLyricsState();
+});
+
+ipcMain.on('ytm:lyrics-overlay-ready', () => {
+  broadcastTrackToTray();
+  broadcastLyricsState();
 });
 
 ipcMain.on('ytm:tray-command', (_event, payload) => {
@@ -1420,6 +1685,9 @@ app.whenReady().then(async () => {
   await createMainWindow();
   setupTray();
   registerMediaShortcuts();
+  if (desktopLyricsEnabled) {
+    createLyricsWindow();
+  }
 
   app.on('activate', () => {
     if (mainWindow) {
@@ -1434,6 +1702,10 @@ app.on('before-quit', () => {
   isQuitting = true;
   cleanupAuthSession();
   updatePowerSaveBlocker(false);
+  if (lyricsWindow && !lyricsWindow.isDestroyed()) {
+    lyricsWindow.destroy();
+    lyricsWindow = null;
+  }
 });
 
 app.on('will-quit', () => {
