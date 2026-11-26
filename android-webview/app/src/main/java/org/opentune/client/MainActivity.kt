@@ -32,6 +32,8 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebViewFeature
 
@@ -41,6 +43,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var floatingNavBar: LinearLayout
     private lateinit var externalLoginButton: Button
     private lateinit var cookieFallbackButton: Button
+    private lateinit var shellController: NativeShellController
     private val startUrl = "https://music.youtube.com"
     private val googleLoginUrl =
         "https://accounts.google.com/ServiceLogin?service=youtube&continue=https%3A%2F%2Fmusic.youtube.com%2F"
@@ -53,7 +56,8 @@ class MainActivity : AppCompatActivity() {
     private val mediaControlReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             val command = intent?.getStringExtra(MediaPlaybackService.EXTRA_COMMAND) ?: return
-            dispatchJsPlaybackCommand(command)
+            val seekSec = intent.getDoubleExtra(MediaPlaybackService.EXTRA_SEEK_SEC, -1.0)
+            dispatchJsPlaybackCommand(command, seekSec)
         }
     }
 
@@ -78,12 +82,41 @@ class MainActivity : AppCompatActivity() {
 
         requestNotificationPermissionIfNeeded()
 
+        shellController = NativeShellController(
+            activity = this,
+            startUrl = startUrl,
+            onNavigateUrl = { url -> webView.loadUrl(url) },
+            onPlaybackCommand = { cmd, seekSec -> dispatchJsPlaybackCommand(cmd, seekSec) }
+        )
+
         val root = FrameLayout(this).apply {
             layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
             setBackgroundColor(Color.parseColor("#030303"))
+        }
+
+        ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
+            val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            v.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+            insets
+        }
+
+        val mainColumn = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        }
+
+        val contentHost = FrameLayout(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                0,
+                1f
+            )
         }
 
         webView = WebView(this).apply {
@@ -93,9 +126,8 @@ class MainActivity : AppCompatActivity() {
             )
             setBackgroundColor(Color.parseColor("#030303"))
         }
-        root.addView(webView)
+        contentHost.addView(webView)
 
-        // Floating Back / Home / External Browser Login bar shown automatically whenever outside music.youtube.com
         floatingNavBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setBackgroundColor(Color.parseColor("#E6121318"))
@@ -158,9 +190,15 @@ class MainActivity : AppCompatActivity() {
             ViewGroup.LayoutParams.WRAP_CONTENT,
             Gravity.TOP or Gravity.CENTER_HORIZONTAL
         ).apply {
-            topMargin = 36
+            topMargin = 24
         }
-        root.addView(floatingNavBar, navParams)
+        contentHost.addView(floatingNavBar, navParams)
+
+        mainColumn.addView(contentHost)
+        mainColumn.addView(shellController.buildMiniPlayerBar())
+        mainColumn.addView(shellController.buildBottomNavBar())
+        root.addView(mainColumn)
+        root.addView(shellController.buildImmersiveLyricsOverlay())
 
         setContentView(root)
 
@@ -220,7 +258,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        view.addJavascriptInterface(WebAppInterface(this), "YTMAndroidBridge")
+        view.addJavascriptInterface(WebAppInterface(this) { shellController.onTrackUpdate(it) }, "YTMAndroidBridge")
         view.webChromeClient = object : WebChromeClient() {
             override fun onPermissionRequest(request: PermissionRequest?) {
                 val resources = request?.resources ?: return
@@ -262,6 +300,7 @@ class MainActivity : AppCompatActivity() {
                 floatingNavBar.visibility = if (onMusic) View.GONE else View.VISIBLE
                 externalLoginButton.visibility = if (isAuth) View.VISIBLE else View.GONE
                 cookieFallbackButton.visibility = if (isAuth) View.VISIBLE else View.GONE
+                shellController.syncTabFromUrl(url)
             }
 
             override fun onPageFinished(v: WebView?, url: String?) {
@@ -312,17 +351,34 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun injectClientEnhancements(view: WebView?) {
-        val hideUpsellJs = """
-            const style = document.createElement('style');
-            style.textContent = 'ytmusic-mealbar-promo-renderer, .open-in-app-banner { display: none !important; }';
-            document.head.appendChild(style);
-            """
+        val hideWebChromeCss = """
+            ytmusic-mealbar-promo-renderer,
+            .open-in-app-banner,
+            ytmusic-pivot-bar-renderer,
+            ytmusic-pivot-bar-item-renderer[tab-id="SPunlimited"] {
+              display: none !important;
+            }
+            ytmusic-player-bar {
+              visibility: hidden !important;
+              opacity: 0 !important;
+              pointer-events: none !important;
+              height: 0 !important;
+              min-height: 0 !important;
+              max-height: 0 !important;
+              overflow: hidden !important;
+            }
+            :root, ytmusic-app, ytmusic-app-layout {
+              --ytmusic-player-bar-height: 0px !important;
+            }
+        """.trimIndent().replace("\n", " ")
 
         val bridgeJs = """
             (function() {
               if (window.__ytmNativeInstalled) return;
               window.__ytmNativeInstalled = true;
-              $hideUpsellJs
+              const style = document.createElement('style');
+              style.textContent = ${org.json.JSONObject.quote(hideWebChromeCss)};
+              document.head.appendChild(style);
               let lastKey = '';
               let lastRecovery = 0;
               setInterval(function() {
@@ -341,29 +397,50 @@ class MainActivity : AppCompatActivity() {
                   }
 
                   const meta = navigator.mediaSession && navigator.mediaSession.metadata;
-                  const title = (meta && meta.title) || document.title.replace(' - YouTube Music', '') || 'YouTube Music';
-                  const artist = (meta && meta.artist) || 'YouTube Music Web';
+                  const titleEl = document.querySelector('ytmusic-player-bar .title');
+                  const bylineEl = document.querySelector('ytmusic-player-bar .byline');
+                  const title = (titleEl && titleEl.textContent && titleEl.textContent.trim())
+                    || (meta && meta.title)
+                    || document.title.replace(' - YouTube Music', '')
+                    || '未在播放';
+                  const artist = (bylineEl && bylineEl.textContent && bylineEl.textContent.trim())
+                    || (meta && meta.artist)
+                    || 'YouTube Music';
+                  let artwork = '';
+                  if (meta && Array.isArray(meta.artwork) && meta.artwork.length > 0) {
+                    artwork = meta.artwork[meta.artwork.length - 1].src || '';
+                  }
+                  if (!artwork) {
+                    const img = document.querySelector('ytmusic-player-bar img.image');
+                    if (img && img.src) artwork = img.src;
+                  }
                   const playing = Boolean(video && !video.paused && !video.ended);
-                  const key = title + '|' + artist + '|' + playing;
+                  const cur = (video && Number.isFinite(video.currentTime)) ? video.currentTime : 0;
+                  const dur = (video && Number.isFinite(video.duration)) ? video.duration : 0;
+                  const key = title + '|' + artist + '|' + artwork + '|' + playing + '|' + Math.floor(cur) + '|' + Math.floor(dur);
                   if (key !== lastKey && window.YTMAndroidBridge) {
                     lastKey = key;
-                    window.YTMAndroidBridge.onPlaybackStateChanged(title, artist, playing);
+                    window.YTMAndroidBridge.onPlaybackStateChanged(title, artist, artwork, playing, cur, dur);
                   }
                 } catch (e) {}
-              }, 1500);
+              }, 500);
             })();
         """.trimIndent()
 
         view?.evaluateJavascript(bridgeJs, null)
     }
 
-    private fun dispatchJsPlaybackCommand(command: String) {
+    private fun dispatchJsPlaybackCommand(command: String, seekSec: Double = -1.0) {
         val script = when (command) {
             "play" -> "(function(){ const v = document.querySelector('video, audio'); if (v) { if (v.paused) { v.play().catch(function(){ document.querySelector('#play-pause-button, .play-pause-button')?.click(); }); } } else { document.querySelector('#play-pause-button, .play-pause-button')?.click(); } })();"
             "pause" -> "(function(){ const v = document.querySelector('video, audio'); if (v) { if (!v.paused) { v.pause(); } } })();"
             "toggle" -> "(function(){ const btn = document.querySelector('#play-pause-button, .play-pause-button'); if (btn) { btn.click(); } else { const v = document.querySelector('video, audio'); if (v) v.paused ? v.play() : v.pause(); } })();"
             "next" -> "document.querySelector('.next-button')?.click();"
             "previous" -> "document.querySelector('.previous-button')?.click();"
+            "seek" -> {
+                if (seekSec < 0) return
+                "(function(t){ const v = document.querySelector('video, audio'); if (v && Number.isFinite(v.duration) && v.duration > 0) { v.currentTime = Math.max(0, Math.min(v.duration, t)); } })($seekSec);"
+            }
             else -> return
         }
         webView.post { webView.evaluateJavascript(script, null) }
@@ -372,7 +449,9 @@ class MainActivity : AppCompatActivity() {
     private fun registerBackNavigation() {
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (webView.canGoBack()) {
+                if (shellController.isLyricsOpen()) {
+                    shellController.setLyricsOverlayOpen(false)
+                } else if (webView.canGoBack()) {
                     webView.goBack()
                 } else {
                     moveTaskToBack(true)
@@ -407,6 +486,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        shellController.release()
         unregisterReceiver(mediaControlReceiver)
         super.onDestroy()
     }

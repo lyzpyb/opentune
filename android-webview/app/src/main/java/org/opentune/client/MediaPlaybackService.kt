@@ -5,17 +5,30 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
 import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import androidx.media.app.NotificationCompat.MediaStyle
+import java.net.HttpURLConnection
+import java.net.URL
+import java.util.concurrent.Executors
 
 class MediaPlaybackService : Service() {
 
@@ -26,19 +39,62 @@ class MediaPlaybackService : Service() {
         const val ACTION_MEDIA_COMMAND = "org.opentune.client.MEDIA_COMMAND"
         const val EXTRA_TITLE = "title"
         const val EXTRA_ARTIST = "artist"
+        const val EXTRA_ARTWORK_URL = "artwork_url"
         const val EXTRA_PLAYING = "playing"
+        const val EXTRA_POSITION_MS = "position_ms"
+        const val EXTRA_DURATION_MS = "duration_ms"
         const val EXTRA_COMMAND = "command"
+        const val EXTRA_SEEK_SEC = "seek_sec"
     }
 
     private lateinit var mediaSession: MediaSessionCompat
+    private lateinit var audioManager: AudioManager
+    private var audioFocusRequest: AudioFocusRequest? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    private val artworkExecutor = Executors.newSingleThreadExecutor()
+    private val mainHandler = Handler(Looper.getMainLooper())
+
     private var currentTitle = "OpenTune"
-    private var currentArtist = "YouTube Music Web"
+    private var currentArtist = "YouTube Music"
+    private var currentArtworkUrl = ""
+    private var currentArtworkBitmap: Bitmap? = null
     private var isPlaying = false
+    private var currentPositionMs = 0L
+    private var currentDurationMs = 0L
+
+    private val becomingNoisyReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY && isPlaying) {
+                broadcastCommand("pause")
+            }
+        }
+    }
+
+    private val audioFocusListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
+        when (focusChange) {
+            AudioManager.AUDIOFOCUS_LOSS,
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
+                if (isPlaying) {
+                    broadcastCommand("pause")
+                }
+            }
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+
+        val attrs = AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_MEDIA)
+            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+            .build()
+        audioFocusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+            .setAudioAttributes(attrs)
+            .setAcceptsDelayedFocusGain(false)
+            .setOnAudioFocusChangeListener(audioFocusListener)
+            .build()
 
         mediaSession = MediaSessionCompat(this, "YtmNativeMediaSession").apply {
             setCallback(object : MediaSessionCompat.Callback() {
@@ -46,20 +102,48 @@ class MediaPlaybackService : Service() {
                 override fun onPause() = broadcastCommand("pause")
                 override fun onSkipToNext() = broadcastCommand("next")
                 override fun onSkipToPrevious() = broadcastCommand("previous")
+                override fun onSeekTo(pos: Long) = broadcastSeek(pos.coerceAtLeast(0L) / 1000.0)
             })
             isActive = true
         }
 
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "org.opentune.client:AudioWakeLock")
+
+        ContextCompat.registerReceiver(
+            this,
+            becomingNoisyReceiver,
+            IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_UPDATE_STATE -> {
+                val prevPlaying = isPlaying
                 currentTitle = intent.getStringExtra(EXTRA_TITLE) ?: currentTitle
                 currentArtist = intent.getStringExtra(EXTRA_ARTIST) ?: currentArtist
                 isPlaying = intent.getBooleanExtra(EXTRA_PLAYING, false)
+                currentPositionMs = intent.getLongExtra(EXTRA_POSITION_MS, currentPositionMs)
+                currentDurationMs = intent.getLongExtra(EXTRA_DURATION_MS, currentDurationMs)
+
+                val newArtUrl = intent.getStringExtra(EXTRA_ARTWORK_URL).orEmpty()
+                if (newArtUrl != currentArtworkUrl) {
+                    currentArtworkUrl = newArtUrl
+                    if (newArtUrl.isBlank()) {
+                        currentArtworkBitmap = null
+                    } else {
+                        loadArtworkAsync(newArtUrl)
+                    }
+                }
+
+                if (isPlaying && !prevPlaying) {
+                    audioFocusRequest?.let { audioManager.requestAudioFocus(it) }
+                } else if (!isPlaying && prevPlaying) {
+                    audioFocusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
+                }
+
                 updateWakeLock(isPlaying)
                 updateMediaSessionAndNotification()
             }
@@ -70,6 +154,33 @@ class MediaPlaybackService : Service() {
             "CMD_PREV" -> broadcastCommand("previous")
         }
         return START_STICKY
+    }
+
+    private fun loadArtworkAsync(url: String) {
+        artworkExecutor.execute {
+            val bitmap = try {
+                val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 5000
+                    readTimeout = 5000
+                    doInput = true
+                }
+                try {
+                    if (conn.responseCode in 200..299) {
+                        conn.inputStream.use { BitmapFactory.decodeStream(it) }
+                    } else null
+                } finally {
+                    conn.disconnect()
+                }
+            } catch (_: Exception) {
+                null
+            }
+            mainHandler.post {
+                if (url == currentArtworkUrl && bitmap != null) {
+                    currentArtworkBitmap = bitmap
+                    updateMediaSessionAndNotification()
+                }
+            }
+        }
     }
 
     private fun updateWakeLock(playing: Boolean) {
@@ -89,6 +200,15 @@ class MediaPlaybackService : Service() {
         sendBroadcast(intent)
     }
 
+    private fun broadcastSeek(seekSec: Double) {
+        val intent = Intent(ACTION_MEDIA_COMMAND).apply {
+            setPackage(packageName)
+            putExtra(EXTRA_COMMAND, "seek")
+            putExtra(EXTRA_SEEK_SEC, seekSec)
+        }
+        sendBroadcast(intent)
+    }
+
     private fun updateMediaSessionAndNotification() {
         val playbackState = PlaybackStateCompat.Builder()
             .setActions(
@@ -96,22 +216,27 @@ class MediaPlaybackService : Service() {
                     PlaybackStateCompat.ACTION_PAUSE or
                     PlaybackStateCompat.ACTION_PLAY_PAUSE or
                     PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
-                    PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS
+                    PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
+                    PlaybackStateCompat.ACTION_SEEK_TO
             )
             .setState(
                 if (isPlaying) PlaybackStateCompat.STATE_PLAYING else PlaybackStateCompat.STATE_PAUSED,
-                PlaybackStateCompat.PLAYBACK_POSITION_UNKNOWN,
-                1.0f
+                currentPositionMs,
+                if (isPlaying) 1.0f else 0.0f
             )
             .build()
 
         mediaSession.setPlaybackState(playbackState)
-        mediaSession.setMetadata(
-            MediaMetadataCompat.Builder()
-                .putString(MediaMetadataCompat.METADATA_KEY_TITLE, currentTitle)
-                .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, currentArtist)
-                .build()
-        )
+
+        val metaBuilder = MediaMetadataCompat.Builder()
+            .putString(MediaMetadataCompat.METADATA_KEY_TITLE, currentTitle)
+            .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, currentArtist)
+            .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, currentDurationMs)
+        currentArtworkBitmap?.let { bmp ->
+            metaBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, bmp)
+            metaBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_DISPLAY_ICON, bmp)
+        }
+        mediaSession.setMetadata(metaBuilder.build())
 
         val notification = buildNotification()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -141,6 +266,7 @@ class MediaPlaybackService : Service() {
             .setContentTitle(currentTitle)
             .setContentText(currentArtist)
             .setSmallIcon(android.R.drawable.ic_media_play)
+            .setLargeIcon(currentArtworkBitmap)
             .setContentIntent(openAppIntent)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setOngoing(isPlaying)
@@ -182,7 +308,12 @@ class MediaPlaybackService : Service() {
     }
 
     override fun onDestroy() {
+        try {
+            unregisterReceiver(becomingNoisyReceiver)
+        } catch (_: Exception) {}
+        audioFocusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
         wakeLock?.takeIf { it.isHeld }?.release()
+        artworkExecutor.shutdownNow()
         mediaSession.release()
         super.onDestroy()
     }
