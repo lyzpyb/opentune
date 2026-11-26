@@ -8,14 +8,17 @@
         --sidebar-w: 228px;
         --topbar-h: 54px;
         --player-h: 82px;
+        --bg-sidebar: #111218;
+        --bg-topbar: #0d0e13;
+        --bg-player: #13141c;
         --accent: #ff0033;
+        --accent-soft: rgba(255, 0, 51, 0.16);
         --accent-hover: #e0002d;
         --border: rgba(255, 255, 255, 0.08);
         --surface-hover: rgba(255, 255, 255, 0.08);
-        --surface-active: rgba(255, 255, 255, 0.13);
         --text-primary: #f5f5f7;
-        --text-secondary: #a1a1aa;
-        --text-muted: #71717a;
+        --text-secondary: rgba(244, 244, 248, 0.82);
+        --text-muted: rgba(244, 244, 248, 0.54);
       }
 
       * {
@@ -30,7 +33,7 @@
         width: 100%;
         height: 100%;
         overflow: hidden;
-        background: transparent;
+        background: var(--bg-sidebar);
         color: var(--text-primary);
         font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Helvetica Neue", sans-serif;
         -webkit-font-smoothing: antialiased;
@@ -40,48 +43,52 @@
         width: 100%;
         height: 100%;
         display: grid;
-        grid-template-columns: var(--sidebar-w) 1fr;
-        grid-template-rows: var(--topbar-h) 1fr var(--player-h);
+        grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+        grid-template-rows: var(--topbar-h) minmax(0, 1fr) var(--player-h);
         grid-template-areas:
           "sidebar topbar"
           "sidebar viewport"
           "player player";
       }
 
-      /* Left Translucent macOS Sidebar */
+      /* Left High-Contrast Dark Sidebar */
       .sidebar {
         grid-area: sidebar;
-        background: rgba(18, 19, 24, 0.62);
+        background: var(--bg-sidebar);
         border-right: 1px solid var(--border);
         display: flex;
         flex-direction: column;
-        padding: 46px 12px 14px;
-        -webkit-app-region: drag;
+        padding: 0 12px 14px;
+        min-height: 0;
       }
 
-      .brand {
+      /* Only the top traffic-light + brand region is draggable so sidebar buttons ALWAYS receive clicks */
+      .sidebar-drag-header {
+        padding: 46px 10px 16px;
         display: flex;
         align-items: center;
         gap: 10px;
-        padding: 4px 10px 18px;
         -webkit-app-region: drag;
+        flex-shrink: 0;
       }
 
       .brand-mark {
-        width: 24px;
-        height: 24px;
+        width: 26px;
+        height: 26px;
         border-radius: 7px;
         background: linear-gradient(135deg, #ff2a55, #d6002b);
         display: flex;
         align-items: center;
         justify-content: center;
-        box-shadow: 0 2px 10px rgba(255, 0, 51, 0.35);
+        box-shadow: 0 3px 12px rgba(255, 0, 51, 0.38);
+        flex-shrink: 0;
       }
 
       .brand-mark svg {
         width: 13px;
         height: 13px;
         fill: #ffffff;
+        margin-left: 1px;
       }
 
       .brand-name {
@@ -96,14 +103,13 @@
         font-weight: 600;
         color: var(--text-muted);
         padding: 10px 10px 6px;
-        letter-spacing: 0.02em;
+        letter-spacing: 0.03em;
       }
 
       .nav-list {
         display: flex;
         flex-direction: column;
-        gap: 2px;
-        -webkit-app-region: no-drag;
+        gap: 3px;
       }
 
       .nav-item {
@@ -128,7 +134,7 @@
         height: 16px;
         stroke: currentColor;
         fill: none;
-        stroke-width: 1.8;
+        stroke-width: 1.9;
         stroke-linecap: round;
         stroke-linejoin: round;
         flex-shrink: 0;
@@ -140,13 +146,13 @@
       }
 
       .nav-item.active {
-        background: var(--surface-active);
+        background: var(--accent-soft);
         color: #ffffff;
         font-weight: 600;
       }
 
       .nav-item.active svg {
-        stroke: var(--accent);
+        stroke: #ff3355;
       }
 
       .sidebar-spacer {
@@ -156,10 +162,9 @@
       .sidebar-footer {
         display: flex;
         flex-direction: column;
-        gap: 4px;
+        gap: 6px;
         padding-top: 12px;
         border-top: 1px solid var(--border);
-        -webkit-app-region: no-drag;
       }
 
       .toggle-row {
@@ -168,10 +173,11 @@
         justify-content: space-between;
         padding: 7px 10px;
         border-radius: 8px;
-        font-size: 12px;
+        font-size: 12.5px;
+        font-weight: 500;
         color: var(--text-secondary);
         cursor: pointer;
-        transition: background 120ms ease;
+        transition: background 120ms ease, color 120ms ease;
       }
 
       .toggle-row:hover {
@@ -180,10 +186,10 @@
       }
 
       .switch {
-        width: 30px;
-        height: 17px;
+        width: 32px;
+        height: 18px;
         border-radius: 999px;
-        background: rgba(255, 255, 255, 0.18);
+        background: rgba(255, 255, 255, 0.22);
         position: relative;
         transition: background 150ms ease;
         flex-shrink: 0;
@@ -194,8 +200,8 @@
         position: absolute;
         top: 2px;
         left: 2px;
-        width: 13px;
-        height: 13px;
+        width: 14px;
+        height: 14px;
         border-radius: 50%;
         background: #ffffff;
         transition: transform 150ms ease;
@@ -206,13 +212,90 @@
       }
 
       .switch.on::after {
-        transform: translateX(13px);
+        transform: translateX(14px);
+      }
+
+      .account-card {
+        margin-top: 4px;
+        padding: 8px 10px;
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid var(--border);
+        display: flex;
+        align-items: center;
+        gap: 9px;
+      }
+
+      .account-avatar {
+        width: 28px;
+        height: 28px;
+        border-radius: 50%;
+        background: linear-gradient(135deg, #2b2e3d, #1c1e28);
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        overflow: hidden;
+        flex-shrink: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 12px;
+        font-weight: 700;
+        color: #ffffff;
+      }
+
+      .account-avatar img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: none;
+      }
+
+      .account-meta {
+        flex: 1;
+        min-width: 0;
+      }
+
+      .account-name {
+        font-size: 12px;
+        font-weight: 600;
+        color: #ffffff;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .account-sub {
+        font-size: 10.5px;
+        color: var(--text-muted);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .account-sub.online {
+        color: #4ade80;
+      }
+
+      .account-mini-btn {
+        appearance: none;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        background: rgba(255, 255, 255, 0.07);
+        color: #f4f4f5;
+        font-size: 11px;
+        font-weight: 500;
+        padding: 4px 8px;
+        border-radius: 6px;
+        cursor: pointer;
+        flex-shrink: 0;
+      }
+
+      .account-mini-btn:hover {
+        background: rgba(255, 255, 255, 0.15);
       }
 
       /* Top Native Header Bar */
       .topbar {
         grid-area: topbar;
-        background: #0c0d11;
+        background: var(--bg-topbar);
         border-bottom: 1px solid var(--border);
         display: flex;
         align-items: center;
@@ -220,6 +303,7 @@
         gap: 14px;
         padding: 0 18px;
         -webkit-app-region: drag;
+        min-width: 0;
       }
 
       .nav-controls {
@@ -227,6 +311,7 @@
         align-items: center;
         gap: 4px;
         -webkit-app-region: no-drag;
+        flex-shrink: 0;
       }
 
       .icon-btn {
@@ -266,6 +351,7 @@
       .search-form {
         flex: 1;
         max-width: 440px;
+        min-width: 140px;
         position: relative;
         -webkit-app-region: no-drag;
       }
@@ -288,7 +374,7 @@
         height: 32px;
         padding: 0 12px 0 34px;
         border-radius: 8px;
-        border: 1px solid var(--border);
+        border: 1px solid rgba(255, 255, 255, 0.1);
         background: rgba(255, 255, 255, 0.06);
         color: #ffffff;
         font-size: 13px;
@@ -301,7 +387,7 @@
       }
 
       .search-input:focus {
-        border-color: rgba(255, 255, 255, 0.24);
+        border-color: rgba(255, 255, 255, 0.28);
         background: rgba(255, 255, 255, 0.1);
       }
 
@@ -310,12 +396,13 @@
         align-items: center;
         gap: 8px;
         -webkit-app-region: no-drag;
+        flex-shrink: 0;
       }
 
       .pill-btn {
         appearance: none;
-        border: 1px solid var(--border);
-        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        background: rgba(255, 255, 255, 0.07);
         color: #f4f4f5;
         height: 30px;
         padding: 0 12px;
@@ -325,12 +412,13 @@
         cursor: pointer;
         display: inline-flex;
         align-items: center;
-        gap: 6px;
+        gap: 7px;
         transition: background 120ms ease;
+        white-space: nowrap;
       }
 
       .pill-btn:hover {
-        background: rgba(255, 255, 255, 0.12);
+        background: rgba(255, 255, 255, 0.14);
       }
 
       .pill-btn.accent {
@@ -344,10 +432,26 @@
         background: var(--accent-hover);
       }
 
+      .top-avatar-dot {
+        width: 18px;
+        height: 18px;
+        border-radius: 50%;
+        object-fit: cover;
+        display: none;
+      }
+
+      .status-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: #4ade80;
+        display: none;
+      }
+
       /* Content Viewport Placeholder (WebContentsView overlays this area) */
       .viewport-placeholder {
         grid-area: viewport;
-        background: #030303;
+        background: #08090c;
       }
 
       /* Full-Window Immersive Now-Playing & Lyrics Overlay */
@@ -379,7 +483,7 @@
       .immersive-scrim {
         position: absolute;
         inset: 0;
-        background: radial-gradient(circle at 25% 40%, rgba(15, 16, 22, 0.25), rgba(8, 9, 13, 0.82));
+        background: radial-gradient(circle at 25% 40%, rgba(15, 16, 22, 0.25), rgba(8, 9, 13, 0.84));
         z-index: 1;
       }
 
@@ -397,7 +501,7 @@
       .immersive-title-tag {
         font-size: 12px;
         font-weight: 600;
-        color: rgba(255, 255, 255, 0.72);
+        color: rgba(255, 255, 255, 0.78);
         letter-spacing: 0.04em;
       }
 
@@ -414,10 +518,10 @@
         flex: 1;
         min-height: 0;
         display: grid;
-        grid-template-columns: minmax(280px, 380px) minmax(320px, 1fr);
+        grid-template-columns: minmax(260px, 360px) minmax(300px, 1fr);
         align-items: center;
-        gap: 56px;
-        padding: 16px 64px 36px;
+        gap: 52px;
+        padding: 16px 56px 36px;
         max-width: 1180px;
         width: 100%;
         margin: 0 auto;
@@ -431,8 +535,8 @@
       }
 
       .immersive-cover {
-        width: min(310px, 34vw);
-        height: min(310px, 34vw);
+        width: min(300px, 32vw);
+        height: min(300px, 32vw);
         border-radius: 18px;
         overflow: hidden;
         background: rgba(255, 255, 255, 0.06);
@@ -467,17 +571,17 @@
       .immersive-track-artist {
         margin-top: 6px;
         font-size: 14px;
-        color: rgba(244, 244, 245, 0.72);
+        color: rgba(244, 244, 245, 0.74);
       }
 
       .lyrics-badge {
         margin-top: 14px;
         font-size: 11px;
-        color: rgba(244, 244, 245, 0.7);
+        color: rgba(244, 244, 245, 0.78);
         padding: 4px 10px;
         border-radius: 999px;
-        background: rgba(255, 255, 255, 0.08);
-        border: 1px solid rgba(255, 255, 255, 0.1);
+        background: rgba(255, 255, 255, 0.09);
+        border: 1px solid rgba(255, 255, 255, 0.12);
       }
 
       .immersive-lyrics-panel {
@@ -495,10 +599,10 @@
       }
 
       .lyric-line {
-        font-size: 23px;
+        font-size: 22px;
         font-weight: 700;
         line-height: 1.48;
-        color: rgba(255, 255, 255, 0.3);
+        color: rgba(255, 255, 255, 0.34);
         padding: 10px 12px;
         border-radius: 10px;
         cursor: pointer;
@@ -507,8 +611,8 @@
       }
 
       .lyric-line:hover {
-        color: rgba(255, 255, 255, 0.68);
-        background: rgba(255, 255, 255, 0.05);
+        color: rgba(255, 255, 255, 0.72);
+        background: rgba(255, 255, 255, 0.06);
       }
 
       .lyric-line.active {
@@ -519,35 +623,36 @@
       .lyric-plain {
         font-size: 17px;
         line-height: 1.9;
-        color: rgba(244, 244, 245, 0.85);
+        color: rgba(244, 244, 245, 0.86);
         white-space: pre-wrap;
         user-select: text;
       }
 
       .lyric-empty {
-        font-size: 16px;
-        color: rgba(244, 244, 245, 0.56);
+        font-size: 15px;
+        color: rgba(244, 244, 245, 0.62);
         line-height: 1.7;
       }
 
-      /* Bottom Native Player Bar */
+      /* Bottom Native Player Bar — Responsive so Volume Slider is NEVER clipped */
       .player-bar {
         grid-area: player;
         position: relative;
         z-index: 70;
-        background: rgba(16, 17, 22, 0.94);
+        background: var(--bg-player);
         border-top: 1px solid var(--border);
-        padding: 0 20px;
+        padding: 0 18px;
         display: grid;
-        grid-template-columns: minmax(220px, 1fr) minmax(300px, 1.35fr) minmax(240px, 1fr);
+        grid-template-columns: minmax(150px, 1fr) minmax(240px, 1.25fr) auto;
         align-items: center;
-        gap: 18px;
+        gap: 14px;
+        overflow: hidden;
       }
 
       .track-info {
         display: flex;
         align-items: center;
-        gap: 12px;
+        gap: 11px;
         min-width: 0;
         padding: 5px 8px 5px 5px;
         margin-left: -5px;
@@ -561,8 +666,8 @@
       }
 
       .cover-box {
-        width: 50px;
-        height: 50px;
+        width: 48px;
+        height: 48px;
         border-radius: 8px;
         overflow: hidden;
         background: #1d1f28;
@@ -601,7 +706,7 @@
 
       .track-artist {
         margin-top: 2px;
-        font-size: 12px;
+        font-size: 11.5px;
         color: var(--text-secondary);
         white-space: nowrap;
         overflow: hidden;
@@ -612,7 +717,8 @@
         display: flex;
         flex-direction: column;
         align-items: center;
-        gap: 7px;
+        gap: 6px;
+        min-width: 0;
       }
 
       .transport {
@@ -634,6 +740,7 @@
         justify-content: center;
         cursor: pointer;
         transition: background 120ms ease, transform 100ms ease, color 120ms ease;
+        flex-shrink: 0;
       }
 
       .ctrl-btn:hover {
@@ -642,8 +749,8 @@
       }
 
       .ctrl-btn.active {
-        color: var(--accent);
-        background: rgba(255, 0, 51, 0.14);
+        color: #ff3355;
+        background: rgba(255, 0, 51, 0.16);
       }
 
       .ctrl-btn.play-main {
@@ -667,7 +774,7 @@
       .text-badge-btn {
         width: auto;
         height: 28px;
-        padding: 0 9px;
+        padding: 0 8px;
         border-radius: 7px;
         font-size: 12px;
         font-weight: 600;
@@ -677,14 +784,15 @@
         width: 100%;
         display: flex;
         align-items: center;
-        gap: 10px;
+        gap: 8px;
       }
 
       .time-label {
         font-size: 11px;
         color: var(--text-muted);
         font-variant-numeric: tabular-nums;
-        width: 36px;
+        width: 34px;
+        flex-shrink: 0;
       }
 
       .time-label.right {
@@ -697,13 +805,14 @@
         display: flex;
         align-items: center;
         cursor: pointer;
+        min-width: 60px;
       }
 
       .progress-track {
         width: 100%;
         height: 4px;
         border-radius: 999px;
-        background: rgba(255, 255, 255, 0.16);
+        background: rgba(255, 255, 255, 0.18);
         overflow: hidden;
         transition: height 120ms ease;
       }
@@ -725,22 +834,26 @@
         align-items: center;
         justify-content: flex-end;
         gap: 6px;
+        flex-shrink: 0;
+        min-width: 0;
       }
 
       .like-btn.liked {
-        color: var(--accent);
+        color: #ff3355;
       }
 
       .volume-wrap {
         display: flex;
         align-items: center;
         gap: 6px;
-        width: 116px;
-        margin-left: 4px;
+        width: clamp(78px, 9vw, 112px);
+        flex-shrink: 0;
       }
 
       .volume-slider {
         flex: 1;
+        min-width: 48px;
+        width: 100%;
         accent-color: #ffffff;
         height: 4px;
         cursor: pointer;
@@ -750,9 +863,9 @@
   <body>
     <div class="app-shell">
       <aside class="sidebar">
-        <div class="brand">
+        <div class="sidebar-drag-header">
           <div class="brand-mark">
-            <svg viewBox="0 0 16 16"><polygon points="5,3 13,8 5,13" /></svg>
+            <svg viewBox="0 0 16 16"><polygon points="4.5,3 13,8 4.5,13" /></svg>
           </div>
           <span class="brand-name">OpenTune</span>
         </div>
@@ -773,7 +886,7 @@
           </button>
         </nav>
 
-        <div class="nav-section-label" style="margin-top: 10px;">我的收藏</div>
+        <div class="nav-section-label" style="margin-top: 8px;">我的收藏</div>
         <nav class="nav-list">
           <button class="nav-item" data-route="liked">
             <svg viewBox="0 0 24 24"><path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.6l-1-1a5.5 5.5 0 0 0-7.8 7.8l1 1L12 21l7.8-7.6 1-1a5.5 5.5 0 0 0 0-7.8z" /></svg>
@@ -796,10 +909,18 @@
             <span>桌面悬浮歌词</span>
             <div id="desktopLyricsSwitch" class="switch"></div>
           </div>
-          <button id="sidebarAuthBtn" class="nav-item">
-            <svg viewBox="0 0 24 24"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4" /><polyline points="10 17 15 12 10 7" /><line x1="15" y1="12" x2="3" y2="12" /></svg>
-            <span>外部浏览器登录</span>
-          </button>
+
+          <div class="account-card">
+            <div class="account-avatar">
+              <img id="sidebarAvatarImg" alt="账号头像" />
+              <span id="sidebarAvatarFallback">G</span>
+            </div>
+            <div class="account-meta">
+              <div id="sidebarAccountName" class="account-name">未登录</div>
+              <div id="sidebarAccountSub" class="account-sub">使用外部浏览器登录</div>
+            </div>
+            <button id="sidebarAccountBtn" class="account-mini-btn">登录</button>
+          </div>
         </div>
       </aside>
 
@@ -823,7 +944,11 @@
 
         <div class="topbar-actions">
           <button id="returnHomeBtn" class="pill-btn accent">返回音乐首页</button>
-          <button id="topAuthBtn" class="pill-btn">账号登录</button>
+          <button id="topAuthBtn" class="pill-btn">
+            <img id="topAvatarImg" class="top-avatar-dot" alt="账号" />
+            <span id="topStatusDot" class="status-dot"></span>
+            <span id="topAuthLabel">登录账号</span>
+          </button>
         </div>
       </header>
 
@@ -917,7 +1042,16 @@
       const searchInput = document.getElementById('searchInput');
       const returnHomeBtn = document.getElementById('returnHomeBtn');
       const topAuthBtn = document.getElementById('topAuthBtn');
-      const sidebarAuthBtn = document.getElementById('sidebarAuthBtn');
+      const topAvatarImg = document.getElementById('topAvatarImg');
+      const topStatusDot = document.getElementById('topStatusDot');
+      const topAuthLabel = document.getElementById('topAuthLabel');
+
+      const sidebarAvatarImg = document.getElementById('sidebarAvatarImg');
+      const sidebarAvatarFallback = document.getElementById('sidebarAvatarFallback');
+      const sidebarAccountName = document.getElementById('sidebarAccountName');
+      const sidebarAccountSub = document.getElementById('sidebarAccountSub');
+      const sidebarAccountBtn = document.getElementById('sidebarAccountBtn');
+
       const mediaKeysRow = document.getElementById('mediaKeysRow');
       const mediaKeysSwitch = document.getElementById('mediaKeysSwitch');
       const desktopLyricsRow = document.getElementById('desktopLyricsRow');
@@ -957,6 +1091,7 @@
       let desktopLyricsEnabled = false;
       let isImmersiveOpen = false;
       let isDraggingVolume = false;
+      let accountState = { loggedIn: false, name: '', avatar: '' };
       let latestTrack = { duration: 0, currentTime: 0 };
       let latestLyrics = { key: '', status: 'idle', synced: [], plain: '' };
       let renderedLyricsKey = '';
@@ -973,6 +1108,52 @@
         navButtons.forEach((btn) => {
           btn.classList.toggle('active', btn.dataset.route === route);
         });
+      }
+
+      function applyAccountUi(state) {
+        accountState = state || { loggedIn: false, name: '', avatar: '' };
+        const loggedIn = Boolean(accountState.loggedIn);
+        const displayName = accountState.name || (loggedIn ? '已登录账号' : '未登录');
+
+        if (loggedIn) {
+          topAuthLabel.textContent = displayName === 'Google 账号已登录' ? '已登录' : displayName;
+          topAuthBtn.title = '点击切换 Google 账号';
+          sidebarAccountName.textContent = displayName;
+          sidebarAccountSub.textContent = 'YouTube Music 已同步';
+          sidebarAccountSub.classList.add('online');
+          sidebarAccountBtn.textContent = '退出';
+          sidebarAccountBtn.title = '退出当前登录账号';
+
+          if (accountState.avatar) {
+            if (topAvatarImg.src !== accountState.avatar) topAvatarImg.src = accountState.avatar;
+            topAvatarImg.style.display = 'block';
+            topStatusDot.style.display = 'none';
+
+            if (sidebarAvatarImg.src !== accountState.avatar) sidebarAvatarImg.src = accountState.avatar;
+            sidebarAvatarImg.style.display = 'block';
+            sidebarAvatarFallback.style.display = 'none';
+          } else {
+            topAvatarImg.style.display = 'none';
+            topStatusDot.style.display = 'inline-block';
+            sidebarAvatarImg.style.display = 'none';
+            sidebarAvatarFallback.style.display = 'block';
+            sidebarAvatarFallback.textContent = '✓';
+          }
+        } else {
+          topAuthLabel.textContent = '登录账号';
+          topAuthBtn.title = '使用外部浏览器登录 Google 账号';
+          topAvatarImg.style.display = 'none';
+          topStatusDot.style.display = 'none';
+
+          sidebarAccountName.textContent = '未登录';
+          sidebarAccountSub.textContent = '外部浏览器登录';
+          sidebarAccountSub.classList.remove('online');
+          sidebarAccountBtn.textContent = '登录';
+          sidebarAccountBtn.title = '使用外部浏览器登录 Google 账号';
+          sidebarAvatarImg.style.display = 'none';
+          sidebarAvatarFallback.style.display = 'block';
+          sidebarAvatarFallback.textContent = 'G';
+        }
       }
 
       function applyImmersiveUi(open, notifyMain = true) {
@@ -1096,8 +1277,15 @@
         if (isImmersiveOpen) applyImmersiveUi(false);
         window.opentuneShell.navigate('home');
       });
+
       topAuthBtn.addEventListener('click', () => window.opentuneShell.openAuth());
-      sidebarAuthBtn.addEventListener('click', () => window.opentuneShell.openAuth());
+      sidebarAccountBtn.addEventListener('click', () => {
+        if (accountState.loggedIn) {
+          window.opentuneShell.logout();
+        } else {
+          window.opentuneShell.openAuth();
+        }
+      });
 
       mediaKeysRow.addEventListener('click', () => {
         mediaKeysEnabled = !mediaKeysEnabled;
@@ -1187,6 +1375,10 @@
         if (typeof settings.immersiveOpen === 'boolean' && settings.immersiveOpen !== isImmersiveOpen) {
           applyImmersiveUi(settings.immersiveOpen, false);
         }
+      });
+
+      window.opentuneShell.onAccountState((state) => {
+        applyAccountUi(state);
       });
 
       window.opentuneShell.onLyricsState((state) => {

@@ -10,6 +10,9 @@ contextBridge.exposeInMainWorld('opentuneShell', {
   openAuth() {
     ipcRenderer.send('ytm:shell-open-auth');
   },
+  logout() {
+    ipcRenderer.send('ytm:shell-logout');
+  },
   setMediaKeysEnabled(enabled) {
     ipcRenderer.send('ytm:shell-set-media-keys', Boolean(enabled));
   },
@@ -37,5 +40,9 @@ contextBridge.exposeInMainWorld('opentuneShell', {
   onLyricsState(callback) {
     if (typeof callback !== 'function') return;
     ipcRenderer.on('ytm:lyrics-state', (_event, payload) => callback(payload));
+  },
+  onAccountState(callback) {
+    if (typeof callback !== 'function') return;
+    ipcRenderer.on('ytm:account-state', (_event, payload) => callback(payload));
   },
 });

@@ -8,7 +8,7 @@ ytmusic-app-layout {
   --ytmusic-player-bar-height: 0px !important;
 }
 
-/* Visually hide web top bar & left guide while keeping DOM live */
+/* Keep nav-bar & guide mounted off-screen so SPA navigation links & user avatar stay live in DOM */
 ytmusic-nav-bar,
 #nav-bar-background,
 #nav-bar-divider,
@@ -16,7 +16,15 @@ ytmusic-guide-renderer,
 #guide-wrapper,
 #mini-guide,
 #mini-guide-background {
-  display: none !important;
+  visibility: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+  position: fixed !important;
+  left: -9999px !important;
+  top: -9999px !important;
+  width: 0 !important;
+  height: 0 !important;
+  overflow: hidden !important;
 }
 
 /* Keep ytmusic-player-bar mounted in DOM so playback/like controls stay functional, but occupy 0px */

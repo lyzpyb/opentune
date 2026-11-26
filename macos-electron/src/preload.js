@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld('ytmNativeBridge', {
 
 window.addEventListener('DOMContentLoaded', () => {
   let lastSnapshot = '';
+  let lastAccountSnapshot = '';
   let lastRecoveryAt = 0;
   let lastPlayAttemptTime = -1;
   let stallTicks = 0;
@@ -34,8 +35,40 @@ window.addEventListener('DOMContentLoaded', () => {
     return likeBtn.getAttribute('aria-pressed') === 'true';
   };
 
+  const pollAccountState = () => {
+    try {
+      const signInBtn = document.querySelector('ytmusic-nav-bar a.sign-in-link');
+      const avatarImg = document.querySelector(
+        'ytmusic-settings-button img#img, ytmusic-settings-button img, ytmusic-nav-bar img.yt-img-shadow'
+      );
+      const avatarSrc = avatarImg && avatarImg.src && avatarImg.src.startsWith('http') ? avatarImg.src : '';
+      const cfgLoggedIn = Boolean(
+        window.ytcfg &&
+        ((typeof window.ytcfg.get === 'function' && window.ytcfg.get('LOGGED_IN')) ||
+          (window.ytcfg.data_ && window.ytcfg.data_.LOGGED_IN))
+      );
+      const loggedIn = Boolean(cfgLoggedIn || (avatarSrc && !signInBtn));
+      const altName = (avatarImg?.getAttribute('alt') || '').trim();
+      const name =
+        altName && !/^(头像|avatar|profile|account|settings)$/i.test(altName)
+          ? altName
+          : loggedIn
+            ? 'Google 账号已登录'
+            : '';
+
+      const accSnap = `${loggedIn}|${name}|${avatarSrc}`;
+      if (accSnap !== lastAccountSnapshot) {
+        lastAccountSnapshot = accSnap;
+        ipcRenderer.send('ytm:account-update', {
+          loggedIn,
+          name,
+          avatar: avatarSrc,
+        });
+      }
+    } catch (_) {}
+  };
+
   const dismissIdlePromptAndRecover = () => {
-    // 1. Auto-confirm YouTube Music "Are you still watching?" pause prompt
     const confirmBtn =
       document.querySelector('ytmusic-you-there-renderer yt-button-renderer button') ||
       document.querySelector('tp-yt-paper-dialog yt-confirm-dialog-renderer #confirm-button button');
@@ -43,7 +76,6 @@ window.addEventListener('DOMContentLoaded', () => {
       confirmBtn.click();
     }
 
-    // 2. Auto-recover transient playback errors without looping
     const now = Date.now();
     if (now - lastRecoveryAt < 15000) return;
 
@@ -72,7 +104,6 @@ window.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
-    // 3. Detect stalled audio buffer while playing
     if (videoEl && !videoEl.paused && !videoEl.ended && videoEl.readyState < 3) {
       if (Math.abs(videoEl.currentTime - lastPlayAttemptTime) < 0.01) {
         stallTicks += 1;
@@ -130,4 +161,6 @@ window.addEventListener('DOMContentLoaded', () => {
   };
 
   setInterval(pollTrackState, 500);
+  setInterval(pollAccountState, 2000);
+  setTimeout(pollAccountState, 800);
 });

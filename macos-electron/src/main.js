@@ -9,6 +9,7 @@ const {
   globalShortcut,
   ipcMain,
   nativeImage,
+  nativeTheme,
   powerSaveBlocker,
   screen,
   session,
@@ -64,6 +65,41 @@ let currentLyrics = {
   synced: [],
   plain: '',
 };
+let accountState = {
+  loggedIn: false,
+  name: '',
+  avatar: '',
+};
+
+function broadcastAccountState() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('ytm:account-state', accountState);
+  }
+}
+
+async function refreshAccountFromCookies() {
+  try {
+    const ses = session.fromPartition(PARTITION_NAME);
+    const cookies = await ses.cookies.get({ domain: 'youtube.com' });
+    const authNames = new Set(['SAPISID', '__Secure-3PAPISID', 'SID', '__Secure-3PSID', 'LOGIN_INFO']);
+    const hasAuth = cookies.some((c) => c && authNames.has(c.name));
+    if (hasAuth && !accountState.loggedIn) {
+      accountState = { loggedIn: true, name: accountState.name || 'Google 账号已登录', avatar: accountState.avatar || '' };
+      broadcastAccountState();
+    } else if (!hasAuth && accountState.loggedIn) {
+      accountState = { loggedIn: false, name: '', avatar: '' };
+      broadcastAccountState();
+    }
+  } catch (_) {}
+}
+
+async function logoutAccount() {
+  const ses = session.fromPartition(PARTITION_NAME);
+  await ses.clearStorageData({ storages: ['cookies', 'localstorage'] });
+  accountState = { loggedIn: false, name: '', avatar: '' };
+  broadcastAccountState();
+  navigateHome();
+}
 
 function getMusicWebContents() {
   if (!musicView || !musicView.webContents || musicView.webContents.isDestroyed()) return null;
@@ -901,14 +937,14 @@ function openAuthWindow() {
 
   const detectedBrowser = findInstalledChromiumBrowser();
   authWindow = new BrowserWindow({
-    width: 480,
-    height: 540,
+    width: 400,
+    height: 316,
     resizable: false,
     minimizable: false,
     maximizable: false,
     fullscreenable: false,
     parent: mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined,
-    title: `外部浏览器登录 — ${APP_NAME}`,
+    title: `登录 Google 账号 — ${APP_NAME}`,
     backgroundColor: '#0e0f14',
     webPreferences: {
       preload: path.join(__dirname, 'auth-preload.js'),
@@ -926,8 +962,8 @@ function openAuthWindow() {
       state: 'ready',
       browserName: detectedBrowser ? detectedBrowser.name : '',
       message: detectedBrowser
-        ? `已检测到本机 ${detectedBrowser.name}，点击下方按钮即可拉起真实浏览器登录并自动回传登录态。`
-        : '未检测到 Chrome / Edge / Brave，可使用下方默认浏览器打开并粘贴 Cookie 完成登录。',
+        ? `已检测到本机 ${detectedBrowser.name}，点击下方按钮完成认证即可自动同步。`
+        : '未检测到 Chrome / Edge / Brave，请先安装其中任意一款 Chromium 浏览器。',
     });
   });
 
@@ -1044,15 +1080,51 @@ function navigateHome() {
   navigateToUrl(START_URL);
 }
 
+async function navigateSpaOrLoad(targetPath) {
+  const wc = getMusicWebContents();
+  if (!wc) return;
+  const fullUrl = `${START_URL}${targetPath}`;
+  const currentUrl = wc.getURL() || '';
+  if (!currentUrl.startsWith(START_URL)) {
+    navigateToUrl(fullUrl);
+    return;
+  }
+  try {
+    const script = `(function(targetPath){
+      const candidates = Array.from(document.querySelectorAll('ytmusic-guide-entry-renderer a[href], ytmusic-guide-section-renderer a[href], a[href]'));
+      const match = candidates.find((a) => {
+        try {
+          const u = new URL(a.getAttribute('href'), location.origin);
+          const full = u.pathname + u.search;
+          if (full === targetPath) return true;
+          if (targetPath === '/library' && u.pathname.startsWith('/library')) return true;
+          return false;
+        } catch (_) { return false; }
+      });
+      if (match) {
+        match.click();
+        return 'clicked';
+      }
+      return 'miss';
+    })(${JSON.stringify(targetPath)});`;
+    const res = await wc.executeJavaScript(script, true);
+    if (res === 'clicked') {
+      setTimeout(() => broadcastNavState(), 250);
+      return;
+    }
+  } catch (_) {}
+  navigateToUrl(fullUrl);
+}
+
 function navigateRoute(route, value) {
   if (route === 'back') return navigateBack();
   if (route === 'forward') return navigateForward();
   if (route === 'reload') return reloadMusicView();
-  if (route === 'home') return navigateToUrl(START_URL);
-  if (route === 'explore') return navigateToUrl(`${START_URL}/explore`);
-  if (route === 'library') return navigateToUrl(`${START_URL}/library/playlists`);
-  if (route === 'liked') return navigateToUrl(`${START_URL}/playlist?list=LM`);
-  if (route === 'history') return navigateToUrl(`${START_URL}/history`);
+  if (route === 'home') return navigateSpaOrLoad('/');
+  if (route === 'explore') return navigateSpaOrLoad('/explore');
+  if (route === 'library') return navigateSpaOrLoad('/library');
+  if (route === 'liked') return navigateSpaOrLoad('/playlist?list=LM');
+  if (route === 'history') return navigateSpaOrLoad('/history');
   if (route === 'search' && typeof value === 'string' && value.trim()) {
     return navigateToUrl(`${START_URL}/search?q=${encodeURIComponent(value.trim())}`);
   }
@@ -1446,15 +1518,15 @@ async function createMainWindow() {
     });
   }
 
+  const appIconPath = path.join(__dirname, '..', 'build', 'icon.png');
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 820,
     minWidth: 960,
     minHeight: 620,
     title: APP_NAME,
-    backgroundColor: process.platform === 'darwin' ? '#00000000' : '#0c0d11',
-    vibrancy: process.platform === 'darwin' ? 'sidebar' : undefined,
-    visualEffectState: process.platform === 'darwin' ? 'active' : undefined,
+    icon: fs.existsSync(appIconPath) ? appIconPath : undefined,
+    backgroundColor: '#111218',
     titleBarStyle: HIDDEN_TITLEBAR ? 'hiddenInset' : 'default',
     trafficLightPosition: HIDDEN_TITLEBAR ? { x: 16, y: 16 } : undefined,
     webPreferences: {
@@ -1618,11 +1690,27 @@ ipcMain.on('ytm:shell-set-immersive', (_event, open) => {
   setImmersiveOpen(Boolean(open));
 });
 
+ipcMain.on('ytm:account-update', (_event, payload) => {
+  if (!payload || typeof payload !== 'object') return;
+  accountState = {
+    loggedIn: Boolean(payload.loggedIn),
+    name: typeof payload.name === 'string' ? payload.name : '',
+    avatar: typeof payload.avatar === 'string' ? payload.avatar : '',
+  };
+  broadcastAccountState();
+});
+
+ipcMain.on('ytm:shell-logout', () => {
+  logoutAccount().catch(() => {});
+});
+
 ipcMain.on('ytm:shell-ready', () => {
   broadcastSettings();
   broadcastNavState();
   broadcastTrackToTray();
   broadcastLyricsState();
+  broadcastAccountState();
+  refreshAccountFromCookies().catch(() => {});
 });
 
 ipcMain.on('ytm:lyrics-overlay-ready', () => {
@@ -1680,11 +1768,19 @@ ipcMain.on('ytm:auth-cancel', () => {
 });
 
 app.whenReady().then(async () => {
+  nativeTheme.themeSource = 'dark';
+  if (process.platform === 'darwin' && app.dock) {
+    const dockIconPath = path.join(__dirname, '..', 'build', 'icon.png');
+    if (fs.existsSync(dockIconPath)) {
+      app.dock.setIcon(dockIconPath);
+    }
+  }
   loadSettings();
   setupAppMenu();
   await createMainWindow();
   setupTray();
   registerMediaShortcuts();
+  refreshAccountFromCookies().catch(() => {});
   if (desktopLyricsEnabled) {
     createLyricsWindow();
   }
