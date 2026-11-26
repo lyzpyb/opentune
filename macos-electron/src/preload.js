@@ -10,125 +10,7 @@ contextBridge.exposeInMainWorld('ytmNativeBridge', {
   },
 });
 
-let navBarRefs = null;
-let latestNavState = {
-  canGoBack: false,
-  canGoForward: false,
-  onMusicHome: true,
-  hiddenTitlebar: true,
-};
-
-function updateNavBarUi(state) {
-  latestNavState = { ...latestNavState, ...state };
-  if (!navBarRefs) return;
-  navBarRefs.backBtn.disabled = !latestNavState.canGoBack;
-  navBarRefs.forwardBtn.disabled = !latestNavState.canGoForward;
-  navBarRefs.returnBadge.style.display = latestNavState.onMusicHome ? 'none' : 'inline-flex';
-  navBarRefs.container.style.left = latestNavState.hiddenTitlebar ? '78px' : '12px';
-}
-
-function mountNativeNavBar() {
-  if (document.getElementById('ytm-native-nav-host')) return;
-  if (!document.documentElement) return;
-
-  const host = document.createElement('div');
-  host.id = 'ytm-native-nav-host';
-  host.style.cssText = 'position:fixed;top:0;left:0;z-index:2147483647;pointer-events:none;';
-  const shadow = host.attachShadow({ mode: 'open' });
-
-  shadow.innerHTML = `
-    <style>
-      .bar {
-        position: fixed;
-        top: 10px;
-        left: ${latestNavState.hiddenTitlebar ? '78px' : '12px'};
-        display: inline-flex;
-        align-items: center;
-        gap: 4px;
-        padding: 3px 5px;
-        border-radius: 8px;
-        background: rgba(18, 19, 24, 0.86);
-        backdrop-filter: blur(12px);
-        -webkit-backdrop-filter: blur(12px);
-        border: 1px solid rgba(255, 255, 255, 0.12);
-        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
-        pointer-events: auto;
-        -webkit-app-region: no-drag;
-        font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif;
-      }
-      button {
-        appearance: none;
-        border: none;
-        background: transparent;
-        color: #f4f4f5;
-        width: 24px;
-        height: 24px;
-        border-radius: 6px;
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        cursor: pointer;
-        font-size: 13px;
-        line-height: 1;
-        transition: background 120ms ease, opacity 120ms ease;
-      }
-      button:hover:not(:disabled) {
-        background: rgba(255, 255, 255, 0.14);
-      }
-      button:disabled {
-        opacity: 0.32;
-        cursor: default;
-      }
-      .return-btn {
-        width: auto;
-        padding: 0 9px;
-        margin-left: 4px;
-        font-size: 11px;
-        font-weight: 600;
-        background: #ff0033;
-        color: #ffffff;
-        display: none;
-      }
-      .return-btn:hover {
-        background: #e0002d !important;
-      }
-    </style>
-    <div class="bar" id="bar">
-      <button id="back" title="返回上一页 (⌘[)" aria-label="返回">←</button>
-      <button id="forward" title="前进下一页 (⌘])" aria-label="前进">→</button>
-      <button id="reload" title="刷新页面 (⌘R)" aria-label="刷新">↻</button>
-      <button id="home" title="返回 YouTube Music 首页 (⇧⌘H)" aria-label="首页">⌂</button>
-      <button id="returnBadge" class="return-btn" title="回到 YouTube Music 主界面">返回音乐首页</button>
-    </div>
-  `;
-
-  const container = shadow.getElementById('bar');
-  const backBtn = shadow.getElementById('back');
-  const forwardBtn = shadow.getElementById('forward');
-  const reloadBtn = shadow.getElementById('reload');
-  const homeBtn = shadow.getElementById('home');
-  const returnBadge = shadow.getElementById('returnBadge');
-
-  backBtn.addEventListener('click', () => ipcRenderer.send('ytm:nav-action', 'back'));
-  forwardBtn.addEventListener('click', () => ipcRenderer.send('ytm:nav-action', 'forward'));
-  reloadBtn.addEventListener('click', () => ipcRenderer.send('ytm:nav-action', 'reload'));
-  homeBtn.addEventListener('click', () => ipcRenderer.send('ytm:nav-action', 'home'));
-  returnBadge.addEventListener('click', () => ipcRenderer.send('ytm:nav-action', 'home'));
-
-  document.documentElement.appendChild(host);
-  navBarRefs = { container, backBtn, forwardBtn, returnBadge };
-  updateNavBarUi(latestNavState);
-}
-
-ipcRenderer.on('ytm:nav-state', (_event, state) => {
-  if (state && typeof state === 'object') {
-    updateNavBarUi(state);
-  }
-});
-
 window.addEventListener('DOMContentLoaded', () => {
-  mountNativeNavBar();
-
   let lastSnapshot = '';
   let lastRecoveryAt = 0;
   let lastPlayAttemptTime = -1;
@@ -142,6 +24,14 @@ window.addEventListener('DOMContentLoaded', () => {
     }
     const imgEl = document.querySelector('ytmusic-player-bar img.image');
     return imgEl?.src || '';
+  };
+
+  const extractLikedState = () => {
+    const likeBtn = document.querySelector(
+      'ytmusic-player-bar ytmusic-like-button-renderer .like button, ytmusic-player-bar #like-button-renderer .like button'
+    );
+    if (!likeBtn) return false;
+    return likeBtn.getAttribute('aria-pressed') === 'true';
   };
 
   const dismissIdlePromptAndRecover = () => {
@@ -206,7 +96,6 @@ window.addEventListener('DOMContentLoaded', () => {
 
   const pollTrackState = () => {
     try {
-      mountNativeNavBar();
       dismissIdlePromptAndRecover();
 
       const titleEl = document.querySelector('ytmusic-player-bar .title');
@@ -220,8 +109,9 @@ window.addEventListener('DOMContentLoaded', () => {
       const duration = videoEl && Number.isFinite(videoEl.duration) ? videoEl.duration : 0;
       const volume = videoEl ? Math.round((videoEl.volume ?? 1) * 100) : 100;
       const muted = Boolean(videoEl && (videoEl.muted || videoEl.volume === 0));
+      const liked = extractLikedState();
 
-      const snapshot = `${title}|${artist}|${artwork}|${playing}|${Math.floor(currentTime)}|${Math.floor(duration)}|${volume}|${muted}`;
+      const snapshot = `${title}|${artist}|${artwork}|${playing}|${Math.floor(currentTime)}|${Math.floor(duration)}|${volume}|${muted}|${liked}`;
       if (snapshot !== lastSnapshot) {
         lastSnapshot = snapshot;
         ipcRenderer.send('ytm:track-update', {
@@ -233,10 +123,11 @@ window.addEventListener('DOMContentLoaded', () => {
           duration,
           volume,
           muted,
+          liked,
         });
       }
     } catch (_) {}
   };
 
-  setInterval(pollTrackState, 1000);
+  setInterval(pollTrackState, 500);
 });

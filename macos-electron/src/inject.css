@@ -1,15 +1,49 @@
-/* macOS Native Window Integration */
-ytmusic-nav-bar {
-  -webkit-app-region: drag;
-  padding-left: 204px !important;
+/* Hide YouTube Music web chrome so OpenTune's native shell owns sidebar, topbar & player bar */
+:root,
+ytmusic-app,
+ytmusic-app-layout {
+  --ytmusic-nav-bar-height: 0px !important;
+  --ytmusic-guide-width: 0px !important;
+  --ytmusic-mini-guide-width: 0px !important;
+  --ytmusic-player-bar-height: 0px !important;
 }
 
-ytmusic-nav-bar a,
-ytmusic-nav-bar button,
-ytmusic-nav-bar input,
-ytmusic-search-box,
-ytmusic-settings-button {
-  -webkit-app-region: no-drag;
+/* Visually hide web top bar & left guide while keeping DOM live */
+ytmusic-nav-bar,
+#nav-bar-background,
+#nav-bar-divider,
+ytmusic-guide-renderer,
+#guide-wrapper,
+#mini-guide,
+#mini-guide-background {
+  display: none !important;
+}
+
+/* Keep ytmusic-player-bar mounted in DOM so playback/like controls stay functional, but occupy 0px */
+ytmusic-player-bar {
+  visibility: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+  height: 0 !important;
+  min-height: 0 !important;
+  max-height: 0 !important;
+  overflow: hidden !important;
+  border: none !important;
+}
+
+/* Expand content stream cleanly edge-to-edge inside WebContentsView */
+ytmusic-app-layout > #content,
+ytmusic-app-layout[guide-persistent-and-open] > #content,
+ytmusic-app-layout[is-bauhaus-sidenav-enabled] > #content {
+  margin-left: 0 !important;
+  padding-left: 0 !important;
+  padding-top: 8px !important;
+  padding-bottom: 24px !important;
+}
+
+ytmusic-player-page {
+  top: 0 !important;
+  height: 100vh !important;
 }
 
 /* Hide redundant upgrade / get-app prompts inside native desktop wrapper */

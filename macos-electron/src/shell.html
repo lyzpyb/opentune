@@ -1,0 +1,835 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>OpenTune</title>
+    <style>
+      :root {
+        --sidebar-w: 228px;
+        --topbar-h: 54px;
+        --player-h: 82px;
+        --accent: #ff0033;
+        --accent-hover: #e0002d;
+        --border: rgba(255, 255, 255, 0.08);
+        --surface-hover: rgba(255, 255, 255, 0.08);
+        --surface-active: rgba(255, 255, 255, 0.13);
+        --text-primary: #f5f5f7;
+        --text-secondary: #a1a1aa;
+        --text-muted: #71717a;
+      }
+
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+        user-select: none;
+      }
+
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: transparent;
+        color: var(--text-primary);
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Helvetica Neue", sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      .app-shell {
+        width: 100%;
+        height: 100%;
+        display: grid;
+        grid-template-columns: var(--sidebar-w) 1fr;
+        grid-template-rows: var(--topbar-h) 1fr var(--player-h);
+        grid-template-areas:
+          "sidebar topbar"
+          "sidebar viewport"
+          "player player";
+      }
+
+      /* Left Translucent macOS Sidebar */
+      .sidebar {
+        grid-area: sidebar;
+        background: rgba(18, 19, 24, 0.62);
+        border-right: 1px solid var(--border);
+        display: flex;
+        flex-direction: column;
+        padding: 46px 12px 14px;
+        -webkit-app-region: drag;
+      }
+
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 4px 10px 18px;
+        -webkit-app-region: drag;
+      }
+
+      .brand-mark {
+        width: 24px;
+        height: 24px;
+        border-radius: 7px;
+        background: linear-gradient(135deg, #ff2a55, #d6002b);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        box-shadow: 0 2px 10px rgba(255, 0, 51, 0.35);
+      }
+
+      .brand-mark svg {
+        width: 13px;
+        height: 13px;
+        fill: #ffffff;
+      }
+
+      .brand-name {
+        font-size: 15px;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+        color: #ffffff;
+      }
+
+      .nav-section-label {
+        font-size: 11px;
+        font-weight: 600;
+        color: var(--text-muted);
+        padding: 10px 10px 6px;
+        letter-spacing: 0.02em;
+      }
+
+      .nav-list {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        -webkit-app-region: no-drag;
+      }
+
+      .nav-item {
+        appearance: none;
+        border: none;
+        background: transparent;
+        color: var(--text-secondary);
+        font-size: 13px;
+        font-weight: 500;
+        padding: 9px 10px;
+        border-radius: 8px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        cursor: pointer;
+        text-align: left;
+        transition: background 120ms ease, color 120ms ease;
+      }
+
+      .nav-item svg {
+        width: 16px;
+        height: 16px;
+        stroke: currentColor;
+        fill: none;
+        stroke-width: 1.8;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        flex-shrink: 0;
+      }
+
+      .nav-item:hover {
+        background: var(--surface-hover);
+        color: #ffffff;
+      }
+
+      .nav-item.active {
+        background: var(--surface-active);
+        color: #ffffff;
+        font-weight: 600;
+      }
+
+      .nav-item.active svg {
+        stroke: var(--accent);
+      }
+
+      .sidebar-spacer {
+        flex: 1;
+      }
+
+      .sidebar-footer {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        padding-top: 12px;
+        border-top: 1px solid var(--border);
+        -webkit-app-region: no-drag;
+      }
+
+      .toggle-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 7px 10px;
+        border-radius: 8px;
+        font-size: 12px;
+        color: var(--text-secondary);
+        cursor: pointer;
+        transition: background 120ms ease;
+      }
+
+      .toggle-row:hover {
+        background: var(--surface-hover);
+        color: #ffffff;
+      }
+
+      .switch {
+        width: 30px;
+        height: 17px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.18);
+        position: relative;
+        transition: background 150ms ease;
+        flex-shrink: 0;
+      }
+
+      .switch::after {
+        content: "";
+        position: absolute;
+        top: 2px;
+        left: 2px;
+        width: 13px;
+        height: 13px;
+        border-radius: 50%;
+        background: #ffffff;
+        transition: transform 150ms ease;
+      }
+
+      .switch.on {
+        background: var(--accent);
+      }
+
+      .switch.on::after {
+        transform: translateX(13px);
+      }
+
+      /* Top Native Header Bar */
+      .topbar {
+        grid-area: topbar;
+        background: #0c0d11;
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 14px;
+        padding: 0 18px;
+        -webkit-app-region: drag;
+      }
+
+      .nav-controls {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        -webkit-app-region: no-drag;
+      }
+
+      .icon-btn {
+        appearance: none;
+        border: none;
+        background: transparent;
+        color: #e4e4e7;
+        width: 28px;
+        height: 28px;
+        border-radius: 7px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        transition: background 120ms ease, opacity 120ms ease;
+      }
+
+      .icon-btn svg {
+        width: 15px;
+        height: 15px;
+        stroke: currentColor;
+        fill: none;
+        stroke-width: 1.9;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+
+      .icon-btn:hover:not(:disabled) {
+        background: var(--surface-hover);
+      }
+
+      .icon-btn:disabled {
+        opacity: 0.3;
+        cursor: default;
+      }
+
+      .search-form {
+        flex: 1;
+        max-width: 440px;
+        position: relative;
+        -webkit-app-region: no-drag;
+      }
+
+      .search-form svg {
+        position: absolute;
+        left: 11px;
+        top: 50%;
+        transform: translateY(-50%);
+        width: 14px;
+        height: 14px;
+        stroke: var(--text-muted);
+        fill: none;
+        stroke-width: 2;
+        pointer-events: none;
+      }
+
+      .search-input {
+        width: 100%;
+        height: 32px;
+        padding: 0 12px 0 34px;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        background: rgba(255, 255, 255, 0.06);
+        color: #ffffff;
+        font-size: 13px;
+        outline: none;
+        transition: border-color 140ms ease, background 140ms ease;
+      }
+
+      .search-input::placeholder {
+        color: var(--text-muted);
+      }
+
+      .search-input:focus {
+        border-color: rgba(255, 255, 255, 0.24);
+        background: rgba(255, 255, 255, 0.1);
+      }
+
+      .topbar-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        -webkit-app-region: no-drag;
+      }
+
+      .pill-btn {
+        appearance: none;
+        border: 1px solid var(--border);
+        background: rgba(255, 255, 255, 0.06);
+        color: #f4f4f5;
+        height: 30px;
+        padding: 0 12px;
+        border-radius: 8px;
+        font-size: 12px;
+        font-weight: 500;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        transition: background 120ms ease;
+      }
+
+      .pill-btn:hover {
+        background: rgba(255, 255, 255, 0.12);
+      }
+
+      .pill-btn.accent {
+        border-color: transparent;
+        background: var(--accent);
+        color: #ffffff;
+        display: none;
+      }
+
+      .pill-btn.accent:hover {
+        background: var(--accent-hover);
+      }
+
+      /* Content Viewport Placeholder (WebContentsView overlays this area) */
+      .viewport-placeholder {
+        grid-area: viewport;
+        background: #030303;
+      }
+
+      /* Bottom Native Player Bar */
+      .player-bar {
+        grid-area: player;
+        background: rgba(16, 17, 22, 0.94);
+        border-top: 1px solid var(--border);
+        padding: 0 20px;
+        display: grid;
+        grid-template-columns: minmax(220px, 1fr) minmax(300px, 1.4fr) minmax(200px, 1fr);
+        align-items: center;
+        gap: 18px;
+      }
+
+      .track-info {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        min-width: 0;
+      }
+
+      .cover-box {
+        width: 50px;
+        height: 50px;
+        border-radius: 8px;
+        overflow: hidden;
+        background: #1d1f28;
+        border: 1px solid var(--border);
+        flex-shrink: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .cover-box img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: none;
+      }
+
+      .cover-fallback {
+        font-size: 20px;
+        color: var(--text-muted);
+      }
+
+      .track-text {
+        min-width: 0;
+        flex: 1;
+      }
+
+      .track-title {
+        font-size: 13px;
+        font-weight: 600;
+        color: #ffffff;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .track-artist {
+        margin-top: 2px;
+        font-size: 12px;
+        color: var(--text-secondary);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .player-center {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 7px;
+      }
+
+      .transport {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+      }
+
+      .ctrl-btn {
+        appearance: none;
+        border: none;
+        background: transparent;
+        color: #e4e4e7;
+        width: 32px;
+        height: 32px;
+        border-radius: 50%;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        transition: background 120ms ease, transform 100ms ease, color 120ms ease;
+      }
+
+      .ctrl-btn:hover {
+        background: var(--surface-hover);
+        color: #ffffff;
+      }
+
+      .ctrl-btn.play-main {
+        width: 36px;
+        height: 36px;
+        background: #ffffff;
+        color: #090a0e;
+      }
+
+      .ctrl-btn.play-main:hover {
+        background: #f4f4f5;
+        transform: scale(1.04);
+      }
+
+      .ctrl-btn svg {
+        width: 16px;
+        height: 16px;
+        fill: currentColor;
+      }
+
+      .progress-row {
+        width: 100%;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .time-label {
+        font-size: 11px;
+        color: var(--text-muted);
+        font-variant-numeric: tabular-nums;
+        width: 36px;
+      }
+
+      .time-label.right {
+        text-align: right;
+      }
+
+      .progress-bar {
+        flex: 1;
+        height: 14px;
+        display: flex;
+        align-items: center;
+        cursor: pointer;
+      }
+
+      .progress-track {
+        width: 100%;
+        height: 4px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.16);
+        overflow: hidden;
+        transition: height 120ms ease;
+      }
+
+      .progress-bar:hover .progress-track {
+        height: 6px;
+      }
+
+      .progress-fill {
+        height: 100%;
+        width: 0%;
+        background: var(--accent);
+        border-radius: 999px;
+        transition: width 220ms linear;
+      }
+
+      .player-right {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 10px;
+      }
+
+      .like-btn.liked {
+        color: var(--accent);
+      }
+
+      .volume-wrap {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        width: 132px;
+      }
+
+      .volume-slider {
+        flex: 1;
+        accent-color: #ffffff;
+        height: 4px;
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">
+            <svg viewBox="0 0 16 16"><polygon points="5,3 13,8 5,13" /></svg>
+          </div>
+          <span class="brand-name">OpenTune</span>
+        </div>
+
+        <div class="nav-section-label">探索音乐</div>
+        <nav class="nav-list">
+          <button class="nav-item active" data-route="home">
+            <svg viewBox="0 0 24 24"><path d="M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5.5v-6.5h-5V21H4a1 1 0 0 1-1-1z" /></svg>
+            <span>首页</span>
+          </button>
+          <button class="nav-item" data-route="explore">
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><polygon points="10,10 16,8 14,14 8,16" /></svg>
+            <span>探索</span>
+          </button>
+          <button class="nav-item" data-route="library">
+            <svg viewBox="0 0 24 24"><path d="M4 19.5V5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v14.5" /><path d="M4 19.5a2.5 2.5 0 0 1 2.5-2.5H20" /></svg>
+            <span>媒体库</span>
+          </button>
+        </nav>
+
+        <div class="nav-section-label" style="margin-top: 10px;">我的收藏</div>
+        <nav class="nav-list">
+          <button class="nav-item" data-route="liked">
+            <svg viewBox="0 0 24 24"><path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.6l-1-1a5.5 5.5 0 0 0-7.8 7.8l1 1L12 21l7.8-7.6 1-1a5.5 5.5 0 0 0 0-7.8z" /></svg>
+            <span>喜欢的音乐</span>
+          </button>
+          <button class="nav-item" data-route="history">
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><polyline points="12 7 12 12 15 15" /></svg>
+            <span>播放历史</span>
+          </button>
+        </nav>
+
+        <div class="sidebar-spacer"></div>
+
+        <div class="sidebar-footer">
+          <div id="mediaKeysRow" class="toggle-row" title="开启后可在后台响应键盘与耳机播放键">
+            <span>全局媒体键</span>
+            <div id="mediaKeysSwitch" class="switch on"></div>
+          </div>
+          <button id="sidebarAuthBtn" class="nav-item">
+            <svg viewBox="0 0 24 24"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4" /><polyline points="10 17 15 12 10 7" /><line x1="15" y1="12" x2="3" y2="12" /></svg>
+            <span>外部浏览器登录</span>
+          </button>
+        </div>
+      </aside>
+
+      <header class="topbar">
+        <div class="nav-controls">
+          <button id="backBtn" class="icon-btn" title="返回上一页 (⌘[)" disabled>
+            <svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6" /></svg>
+          </button>
+          <button id="forwardBtn" class="icon-btn" title="前进下一页 (⌘])" disabled>
+            <svg viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6" /></svg>
+          </button>
+          <button id="reloadBtn" class="icon-btn" title="刷新页面 (⌘R)">
+            <svg viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10" /><path d="M20.5 15a9 9 0 1 1-2.1-9.4L23 10" /></svg>
+          </button>
+        </div>
+
+        <form id="searchForm" class="search-form">
+          <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" /><line x1="21" y1="21" x2="16.65" y2="16.65" /></svg>
+          <input id="searchInput" class="search-input" type="search" placeholder="搜索歌曲、专辑、艺人或歌单 (⌘K)" />
+        </form>
+
+        <div class="topbar-actions">
+          <button id="returnHomeBtn" class="pill-btn accent">返回音乐首页</button>
+          <button id="topAuthBtn" class="pill-btn">账号登录</button>
+        </div>
+      </header>
+
+      <div class="viewport-placeholder"></div>
+
+      <footer class="player-bar">
+        <div class="track-info">
+          <div class="cover-box">
+            <img id="coverImg" alt="专辑封面" />
+            <span id="coverFallback" class="cover-fallback">♪</span>
+          </div>
+          <div class="track-text">
+            <div id="trackTitle" class="track-title">未在播放</div>
+            <div id="trackArtist" class="track-artist">OpenTune</div>
+          </div>
+        </div>
+
+        <div class="player-center">
+          <div class="transport">
+            <button id="prevBtn" class="ctrl-btn" title="上一首">
+              <svg viewBox="0 0 24 24"><path d="M6 6h2v12H6zm3.5 6 8.5 6V6z" /></svg>
+            </button>
+            <button id="playBtn" class="ctrl-btn play-main" title="播放 / 暂停">
+              <svg id="playIcon" viewBox="0 0 24 24"><polygon points="7,5 19,12 7,19" /></svg>
+            </button>
+            <button id="nextBtn" class="ctrl-btn" title="下一首">
+              <svg viewBox="0 0 24 24"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z" /></svg>
+            </button>
+          </div>
+          <div class="progress-row">
+            <span id="curTime" class="time-label">0:00</span>
+            <div id="progressBar" class="progress-bar" title="点击跳转进度">
+              <div class="progress-track">
+                <div id="progressFill" class="progress-fill"></div>
+              </div>
+            </div>
+            <span id="durTime" class="time-label right">0:00</span>
+          </div>
+        </div>
+
+        <div class="player-right">
+          <button id="likeBtn" class="ctrl-btn like-btn" title="喜欢这首歌">
+            <svg viewBox="0 0 24 24" style="fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;">
+              <path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.6l-1-1a5.5 5.5 0 0 0-7.8 7.8l1 1L12 21l7.8-7.6 1-1a5.5 5.5 0 0 0 0-7.8z" />
+            </svg>
+          </button>
+          <div class="volume-wrap">
+            <button id="muteBtn" class="icon-btn" title="静音 / 取消静音">
+              <svg id="volIcon" viewBox="0 0 24 24"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" /><path d="M15.5 8.5a5 5 0 0 1 0 7" /><path d="M19 5a10 10 0 0 1 0 14" /></svg>
+            </button>
+            <input id="volumeSlider" class="volume-slider" type="range" min="0" max="100" value="100" aria-label="音量" />
+          </div>
+        </div>
+      </footer>
+    </div>
+
+    <script>
+      const navButtons = Array.from(document.querySelectorAll('.nav-item[data-route]'));
+      const backBtn = document.getElementById('backBtn');
+      const forwardBtn = document.getElementById('forwardBtn');
+      const reloadBtn = document.getElementById('reloadBtn');
+      const searchForm = document.getElementById('searchForm');
+      const searchInput = document.getElementById('searchInput');
+      const returnHomeBtn = document.getElementById('returnHomeBtn');
+      const topAuthBtn = document.getElementById('topAuthBtn');
+      const sidebarAuthBtn = document.getElementById('sidebarAuthBtn');
+      const mediaKeysRow = document.getElementById('mediaKeysRow');
+      const mediaKeysSwitch = document.getElementById('mediaKeysSwitch');
+
+      const coverImg = document.getElementById('coverImg');
+      const coverFallback = document.getElementById('coverFallback');
+      const trackTitle = document.getElementById('trackTitle');
+      const trackArtist = document.getElementById('trackArtist');
+      const prevBtn = document.getElementById('prevBtn');
+      const playBtn = document.getElementById('playBtn');
+      const playIcon = document.getElementById('playIcon');
+      const nextBtn = document.getElementById('nextBtn');
+      const progressBar = document.getElementById('progressBar');
+      const progressFill = document.getElementById('progressFill');
+      const curTime = document.getElementById('curTime');
+      const durTime = document.getElementById('durTime');
+      const likeBtn = document.getElementById('likeBtn');
+      const muteBtn = document.getElementById('muteBtn');
+      const volumeSlider = document.getElementById('volumeSlider');
+
+      let mediaKeysEnabled = true;
+      let isDraggingVolume = false;
+
+      function fmt(sec) {
+        const s = Math.max(0, Math.floor(sec || 0));
+        const m = Math.floor(s / 60);
+        const r = s % 60;
+        return m + ':' + (r < 10 ? '0' + r : r);
+      }
+
+      function setActiveRoute(route) {
+        navButtons.forEach((btn) => {
+          btn.classList.toggle('active', btn.dataset.route === route);
+        });
+      }
+
+      navButtons.forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const route = btn.dataset.route;
+          setActiveRoute(route);
+          window.opentuneShell.navigate(route);
+        });
+      });
+
+      backBtn.addEventListener('click', () => window.opentuneShell.navigate('back'));
+      forwardBtn.addEventListener('click', () => window.opentuneShell.navigate('forward'));
+      reloadBtn.addEventListener('click', () => window.opentuneShell.navigate('reload'));
+      returnHomeBtn.addEventListener('click', () => window.opentuneShell.navigate('home'));
+      topAuthBtn.addEventListener('click', () => window.opentuneShell.openAuth());
+      sidebarAuthBtn.addEventListener('click', () => window.opentuneShell.openAuth());
+
+      mediaKeysRow.addEventListener('click', () => {
+        mediaKeysEnabled = !mediaKeysEnabled;
+        mediaKeysSwitch.classList.toggle('on', mediaKeysEnabled);
+        window.opentuneShell.setMediaKeysEnabled(mediaKeysEnabled);
+      });
+
+      searchForm.addEventListener('submit', (e) => {
+        e.preventDefault();
+        const q = searchInput.value.trim();
+        if (!q) return;
+        window.opentuneShell.navigate('search', q);
+        searchInput.blur();
+      });
+
+      window.addEventListener('keydown', (e) => {
+        if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+          e.preventDefault();
+          searchInput.focus();
+          searchInput.select();
+        }
+      });
+
+      prevBtn.addEventListener('click', () => window.opentuneShell.playerCommand('previous'));
+      playBtn.addEventListener('click', () => window.opentuneShell.playerCommand('toggle'));
+      nextBtn.addEventListener('click', () => window.opentuneShell.playerCommand('next'));
+      likeBtn.addEventListener('click', () => window.opentuneShell.playerCommand('toggleLike'));
+      muteBtn.addEventListener('click', () => window.opentuneShell.playerCommand('toggleMute'));
+
+      progressBar.addEventListener('click', (e) => {
+        const rect = progressBar.getBoundingClientRect();
+        const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+        window.opentuneShell.playerCommand('seek', ratio);
+      });
+
+      volumeSlider.addEventListener('pointerdown', () => {
+        isDraggingVolume = true;
+      });
+      window.addEventListener('pointerup', () => {
+        isDraggingVolume = false;
+      });
+      volumeSlider.addEventListener('input', () => {
+        window.opentuneShell.playerCommand('volume', Number(volumeSlider.value));
+      });
+
+      window.opentuneShell.onNavState((state) => {
+        if (!state) return;
+        backBtn.disabled = !state.canGoBack;
+        forwardBtn.disabled = !state.canGoForward;
+        returnHomeBtn.style.display = state.onMusicHome ? 'none' : 'inline-flex';
+        if (state.activeRoute) {
+          setActiveRoute(state.activeRoute);
+        }
+      });
+
+      window.opentuneShell.onSettingsState((settings) => {
+        if (!settings) return;
+        if (typeof settings.enableMediaKeys === 'boolean') {
+          mediaKeysEnabled = settings.enableMediaKeys;
+          mediaKeysSwitch.classList.toggle('on', mediaKeysEnabled);
+        }
+      });
+
+      window.opentuneShell.onTrackState((state) => {
+        if (!state) return;
+        trackTitle.textContent = state.title || '未在播放';
+        trackArtist.textContent = state.artist || 'OpenTune';
+
+        playIcon.innerHTML = state.playing
+          ? '<rect x="6" y="5" width="4" height="14" rx="1" /><rect x="14" y="5" width="4" height="14" rx="1" />'
+          : '<polygon points="7,5 19,12 7,19" />';
+
+        if (state.artwork) {
+          if (coverImg.src !== state.artwork) coverImg.src = state.artwork;
+          coverImg.style.display = 'block';
+          coverFallback.style.display = 'none';
+        } else {
+          coverImg.style.display = 'none';
+          coverFallback.style.display = 'block';
+        }
+
+        const dur = Number(state.duration) || 0;
+        const cur = Number(state.currentTime) || 0;
+        const pct = dur > 0 ? Math.max(0, Math.min(100, (cur / dur) * 100)) : 0;
+        progressFill.style.width = pct + '%';
+        curTime.textContent = fmt(cur);
+        durTime.textContent = fmt(dur);
+
+        likeBtn.classList.toggle('liked', Boolean(state.liked));
+        const heartSvg = likeBtn.querySelector('svg');
+        if (heartSvg) {
+          heartSvg.style.fill = state.liked ? 'currentColor' : 'none';
+        }
+
+        if (!isDraggingVolume) {
+          const vol = state.muted ? 0 : (Number.isFinite(state.volume) ? state.volume : 100);
+          volumeSlider.value = String(vol);
+        }
+      });
+
+      window.opentuneShell.requestInitialState();
+    </script>
+  </body>
+</html>

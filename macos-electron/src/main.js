@@ -3,6 +3,7 @@ const {
   BrowserWindow,
   Menu,
   Tray,
+  WebContentsView,
   clipboard,
   dialog,
   globalShortcut,
@@ -37,17 +38,37 @@ const CLOSE_TO_TRAY = true;
 const HIDDEN_TITLEBAR = true;
 const PROXY_SERVER = "";
 const MEDIA_SHORTCUTS = ['MediaPlayPause', 'MediaNextTrack', 'MediaPreviousTrack'];
+const SIDEBAR_WIDTH = 228;
+const TOPBAR_HEIGHT = 54;
+const PLAYER_HEIGHT = 82;
 
 const CHROME_VERSION = process.versions.chrome || '130.0.0.0';
 const CHROME_MAC_UA = `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${CHROME_VERSION} Safari/537.36`;
 
 let mainWindow = null;
+let musicView = null;
 let tray = null;
 let trayWindow = null;
 let authWindow = null;
 let isQuitting = false;
 let powerBlockerId = null;
 let mediaKeysEnabled = ENABLE_MEDIA_KEYS;
+
+function getMusicWebContents() {
+  if (!musicView || !musicView.webContents || musicView.webContents.isDestroyed()) return null;
+  return musicView.webContents;
+}
+
+function layoutMusicView() {
+  if (!mainWindow || mainWindow.isDestroyed() || !musicView) return;
+  const [contentWidth, contentHeight] = mainWindow.getContentSize();
+  musicView.setBounds({
+    x: SIDEBAR_WIDTH,
+    y: TOPBAR_HEIGHT,
+    width: Math.max(0, contentWidth - SIDEBAR_WIDTH),
+    height: Math.max(0, contentHeight - TOPBAR_HEIGHT - PLAYER_HEIGHT),
+  });
+}
 
 function getSettingsPath() {
   return path.join(app.getPath('userData'), 'settings.json');
@@ -82,11 +103,20 @@ function saveSettings(partial) {
   } catch (_) {}
 }
 
+function broadcastSettings() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('ytm:settings-state', {
+      enableMediaKeys: mediaKeysEnabled,
+    });
+  }
+}
+
 function setMediaKeysEnabled(enabled) {
   mediaKeysEnabled = Boolean(enabled);
   saveSettings({ enableMediaKeys: mediaKeysEnabled });
   applyMediaShortcuts(mediaKeysEnabled);
   setupAppMenu();
+  broadcastSettings();
 }
 
 let activeAuthSession = null;
@@ -100,6 +130,7 @@ let currentTrack = {
   duration: 0,
   volume: 100,
   muted: false,
+  liked: false,
 };
 
 function isGoogleAuthUrl(rawUrl) {
@@ -143,19 +174,37 @@ function updatePowerSaveBlocker(isPlaying) {
   }
 }
 
+function detectActiveRoute(rawUrl) {
+  try {
+    const parsed = new URL(rawUrl);
+    const pathname = parsed.pathname || '/';
+    const listParam = parsed.searchParams.get('list');
+    if (pathname === '/' || pathname === '') return 'home';
+    if (pathname.startsWith('/explore')) return 'explore';
+    if (pathname.startsWith('/library')) return 'library';
+    if (pathname.startsWith('/history')) return 'history';
+    if (pathname.startsWith('/playlist') && listParam === 'LM') return 'liked';
+    return '';
+  } catch (_) {
+    return '';
+  }
+}
+
 function broadcastNavState() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
-  const wc = mainWindow.webContents;
+  const wc = getMusicWebContents();
+  if (!wc) return;
   const currentUrl = wc.getURL() || START_URL;
   let onMusicHome = true;
   try {
     onMusicHome = new URL(currentUrl).hostname.toLowerCase() === 'music.youtube.com';
   } catch (_) {}
-  wc.send('ytm:nav-state', {
+  mainWindow.webContents.send('ytm:nav-state', {
     canGoBack: wc.navigationHistory ? wc.navigationHistory.canGoBack() : wc.canGoBack(),
     canGoForward: wc.navigationHistory ? wc.navigationHistory.canGoForward() : wc.canGoForward(),
     url: currentUrl,
     onMusicHome,
+    activeRoute: detectActiveRoute(currentUrl),
     hiddenTitlebar: HIDDEN_TITLEBAR,
   });
 }
@@ -163,6 +212,9 @@ function broadcastNavState() {
 function broadcastTrackToTray() {
   if (tray) {
     tray.setToolTip(`${APP_NAME} — ${currentTrack.title}`);
+  }
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('ytm:track-state', currentTrack);
   }
   if (trayWindow && !trayWindow.isDestroyed()) {
     trayWindow.webContents.send('ytm:tray-state', currentTrack);
@@ -659,7 +711,8 @@ function openAuthWindow() {
 }
 
 function sendPlayerCommand(action, value) {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const wc = getMusicWebContents();
+  if (!wc) return;
   if (action === 'volume') {
     const clamped = Math.max(0, Math.min(100, Number(value) || 0));
     const script = `(function(vol){
@@ -676,7 +729,7 @@ function sendPlayerCommand(action, value) {
         slider.dispatchEvent(new Event('input', { bubbles: true }));
       }
     })(${clamped});`;
-    mainWindow.webContents.executeJavaScript(script, true).catch(() => {});
+    wc.executeJavaScript(script, true).catch(() => {});
     currentTrack = { ...currentTrack, volume: clamped, muted: clamped === 0 };
     broadcastTrackToTray();
     return;
@@ -692,7 +745,16 @@ function sendPlayerCommand(action, value) {
         video.muted = !video.muted;
       }
     })();`;
-    mainWindow.webContents.executeJavaScript(script, true).catch(() => {});
+    wc.executeJavaScript(script, true).catch(() => {});
+    return;
+  }
+
+  if (action === 'toggleLike') {
+    const script = `(function(){
+      const likeBtn = document.querySelector('ytmusic-player-bar ytmusic-like-button-renderer .like button, ytmusic-player-bar #like-button-renderer .like button');
+      if (likeBtn) likeBtn.click();
+    })();`;
+    wc.executeJavaScript(script, true).catch(() => {});
     return;
   }
 
@@ -704,7 +766,7 @@ function sendPlayerCommand(action, value) {
         video.currentTime = video.duration * r;
       }
     })(${ratio});`;
-    mainWindow.webContents.executeJavaScript(script, true).catch(() => {});
+    wc.executeJavaScript(script, true).catch(() => {});
     return;
   }
 
@@ -716,14 +778,12 @@ function sendPlayerCommand(action, value) {
   const selector = selectorMap[action];
   if (!selector) return;
 
-  mainWindow.webContents
-    .executeJavaScript(`document.querySelector(${JSON.stringify(selector)})?.click();`, true)
-    .catch(() => {});
+  wc.executeJavaScript(`document.querySelector(${JSON.stringify(selector)})?.click();`, true).catch(() => {});
 }
 
 function navigateBack() {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
-  const wc = mainWindow.webContents;
+  const wc = getMusicWebContents();
+  if (!wc) return;
   if (wc.navigationHistory ? wc.navigationHistory.canGoBack() : wc.canGoBack()) {
     if (wc.navigationHistory) wc.navigationHistory.goBack();
     else wc.goBack();
@@ -731,20 +791,44 @@ function navigateBack() {
 }
 
 function navigateForward() {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
-  const wc = mainWindow.webContents;
+  const wc = getMusicWebContents();
+  if (!wc) return;
   if (wc.navigationHistory ? wc.navigationHistory.canGoForward() : wc.canGoForward()) {
     if (wc.navigationHistory) wc.navigationHistory.goForward();
     else wc.goForward();
   }
 }
 
-function navigateHome() {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
+function reloadMusicView() {
+  const wc = getMusicWebContents();
+  if (wc) wc.reload();
+}
+
+function navigateToUrl(targetUrl) {
+  const wc = getMusicWebContents();
+  if (!wc) return;
   if (SANITIZE_UA) {
-    mainWindow.webContents.setUserAgent(CHROME_MAC_UA);
+    wc.setUserAgent(CHROME_MAC_UA);
   }
-  mainWindow.loadURL(START_URL);
+  wc.loadURL(targetUrl);
+}
+
+function navigateHome() {
+  navigateToUrl(START_URL);
+}
+
+function navigateRoute(route, value) {
+  if (route === 'back') return navigateBack();
+  if (route === 'forward') return navigateForward();
+  if (route === 'reload') return reloadMusicView();
+  if (route === 'home') return navigateToUrl(START_URL);
+  if (route === 'explore') return navigateToUrl(`${START_URL}/explore`);
+  if (route === 'library') return navigateToUrl(`${START_URL}/library/playlists`);
+  if (route === 'liked') return navigateToUrl(`${START_URL}/playlist?list=LM`);
+  if (route === 'history') return navigateToUrl(`${START_URL}/history`);
+  if (route === 'search' && typeof value === 'string' && value.trim()) {
+    return navigateToUrl(`${START_URL}/search?q=${encodeURIComponent(value.trim())}`);
+  }
 }
 
 async function importCookieString(raw) {
@@ -873,7 +957,7 @@ function setupAppMenu() {
         {
           label: '重新加载当前页',
           accelerator: 'CmdOrCtrl+R',
-          click: () => mainWindow?.webContents.reload(),
+          click: () => reloadMusicView(),
         },
       ],
     },
@@ -1123,9 +1207,20 @@ async function createMainWindow() {
     minWidth: 960,
     minHeight: 620,
     title: APP_NAME,
-    backgroundColor: '#030303',
+    backgroundColor: process.platform === 'darwin' ? '#00000000' : '#0c0d11',
+    vibrancy: process.platform === 'darwin' ? 'sidebar' : undefined,
+    visualEffectState: process.platform === 'darwin' ? 'active' : undefined,
     titleBarStyle: HIDDEN_TITLEBAR ? 'hiddenInset' : 'default',
-    trafficLightPosition: HIDDEN_TITLEBAR ? { x: 14, y: 14 } : undefined,
+    trafficLightPosition: HIDDEN_TITLEBAR ? { x: 16, y: 16 } : undefined,
+    webPreferences: {
+      preload: path.join(__dirname, 'shell-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+
+  musicView = new WebContentsView({
     webPreferences: {
       partition: PARTITION_NAME,
       preload: path.join(__dirname, 'preload.js'),
@@ -1137,8 +1232,20 @@ async function createMainWindow() {
     },
   });
 
+  musicView.setBackgroundColor('#030303');
+  mainWindow.contentView.addChildView(musicView);
+  layoutMusicView();
+
+  mainWindow.on('resize', () => layoutMusicView());
+  mainWindow.on('maximize', () => layoutMusicView());
+  mainWindow.on('unmaximize', () => layoutMusicView());
+  mainWindow.on('enter-full-screen', () => layoutMusicView());
+  mainWindow.on('leave-full-screen', () => layoutMusicView());
+
+  const musicWc = musicView.webContents;
+
   // Intercept Google Sign-In navigations & 302 redirects and route them to External Browser Login (prevents embedded redirect loops)
-  mainWindow.webContents.on('will-navigate', (event, url) => {
+  musicWc.on('will-navigate', (event, url) => {
     if (isGoogleAuthUrl(url)) {
       event.preventDefault();
       openAuthWindow();
@@ -1150,7 +1257,7 @@ async function createMainWindow() {
     }
   });
 
-  mainWindow.webContents.on('will-redirect', (event, url, _isInPlace, isMainFrame) => {
+  musicWc.on('will-redirect', (event, url, _isInPlace, isMainFrame) => {
     if (!isMainFrame) return;
     if (isGoogleAuthUrl(url)) {
       event.preventDefault();
@@ -1163,9 +1270,9 @@ async function createMainWindow() {
     }
   });
 
-  mainWindow.webContents.on('did-navigate', () => broadcastNavState());
-  mainWindow.webContents.on('did-navigate-in-page', () => broadcastNavState());
-  mainWindow.webContents.on('did-finish-load', () => broadcastNavState());
+  musicWc.on('did-navigate', () => broadcastNavState());
+  musicWc.on('did-navigate-in-page', () => broadcastNavState());
+  musicWc.on('did-finish-load', () => broadcastNavState());
 
   // Native macOS trackpad 2-finger swipe back / forward
   mainWindow.on('swipe', (_event, direction) => {
@@ -1174,24 +1281,24 @@ async function createMainWindow() {
   });
 
   // Route Google Sign-In popups to External Browser Login; send other external links to default browser
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+  musicWc.setWindowOpenHandler(({ url }) => {
     if (isGoogleAuthUrl(url)) {
       openAuthWindow();
       return { action: 'deny' };
     }
     if (isAllowedInAppUrl(url)) {
-      mainWindow.loadURL(url);
+      navigateToUrl(url);
       return { action: 'deny' };
     }
     shell.openExternal(url);
     return { action: 'deny' };
   });
 
-  mainWindow.webContents.on('dom-ready', () => {
+  musicWc.on('dom-ready', () => {
     const cssPath = path.join(__dirname, 'inject.css');
     if (fs.existsSync(cssPath)) {
       const css = fs.readFileSync(cssPath, 'utf-8');
-      mainWindow.webContents.insertCSS(css).catch(() => {});
+      musicWc.insertCSS(css).catch(() => {});
     }
     broadcastNavState();
   });
@@ -1203,7 +1310,13 @@ async function createMainWindow() {
     }
   });
 
-  mainWindow.loadURL(START_URL);
+  mainWindow.on('closed', () => {
+    musicView = null;
+    mainWindow = null;
+  });
+
+  mainWindow.loadFile(path.join(__dirname, 'shell.html'));
+  navigateHome();
 }
 
 ipcMain.on('ytm:track-update', (_event, payload) => {
@@ -1218,16 +1331,38 @@ ipcMain.on('ytm:track-update', (_event, payload) => {
     duration: Number.isFinite(payload.duration) ? payload.duration : 0,
     volume: Number.isFinite(payload.volume) ? Math.max(0, Math.min(100, Math.round(payload.volume))) : currentTrack.volume,
     muted: Boolean(payload.muted),
+    liked: Boolean(payload.liked),
   };
   updatePowerSaveBlocker(playing);
   broadcastTrackToTray();
 });
 
 ipcMain.on('ytm:nav-action', (_event, action) => {
-  if (action === 'back') navigateBack();
-  else if (action === 'forward') navigateForward();
-  else if (action === 'reload') mainWindow?.webContents.reload();
-  else if (action === 'home') navigateHome();
+  navigateRoute(action);
+});
+
+ipcMain.on('ytm:shell-nav', (_event, payload) => {
+  if (!payload || typeof payload !== 'object') return;
+  navigateRoute(payload.action, payload.value);
+});
+
+ipcMain.on('ytm:shell-player', (_event, payload) => {
+  if (!payload || typeof payload !== 'object') return;
+  sendPlayerCommand(payload.action, payload.value);
+});
+
+ipcMain.on('ytm:shell-open-auth', () => {
+  openAuthWindow();
+});
+
+ipcMain.on('ytm:shell-set-media-keys', (_event, enabled) => {
+  setMediaKeysEnabled(Boolean(enabled));
+});
+
+ipcMain.on('ytm:shell-ready', () => {
+  broadcastSettings();
+  broadcastNavState();
+  broadcastTrackToTray();
 });
 
 ipcMain.on('ytm:tray-command', (_event, payload) => {
